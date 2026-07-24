@@ -247,6 +247,12 @@ export async function dispatchToOpenClaw(
                     // ── 4. tool 媒体：立即转发 ──
                     if (kind === 'tool') {
                       await forwardMediaUrls(payload, deliverCtx, deliveredMediaUrls, dlog);
+                      // static 模式：工具调用开始时立即把已累积的中途文本发出（对齐
+                      // telegram prepareAnswerLaneForToolProgress），避免工具执行期间
+                      // 文本一直堆积、直到下一段推理才发送的延迟。
+                      if (streamingController?.isStaticSendMode) {
+                        await streamingController.flushSegment();
+                      }
                       return;
                     }
 

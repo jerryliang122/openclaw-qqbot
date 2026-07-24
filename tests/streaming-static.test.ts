@@ -199,29 +199,41 @@ await test("静态: onAssistantMessageStart 触发分段 — 旧文本立即发�
   assert.strictEqual(ctrl.currentPhase, "done", "finalize 后应为 done");
 });
 
-await test("静态: 多工具调用多段推理 — onAssistantMessageStart 驱动逐段即时发送", async () => {
+await test("静态: 多工具调用多段推理 — 工具开始时即时 flush（无延迟）", async () => {
   const ctrl = makeController({ sendMode: "static" });
 
-  // 精确模拟用户报告的真实场景：
-  //   用户问题 → 中途文本A(推理) → 工具调用 → 中途文本B(推理) → 工具调用 → 最终回复C
-  // 框架回调顺序（对齐 OpenClaw embedded-agent-subscribe.handlers.messages.ts）：
-  //   onAssistantMessageStart(段A开始) → onPartialReply(A...) → onAssistantMessageStart(段B开始,工具后)
-  //   → onPartialReply(B...) → onAssistantMessageStart(段C开始,工具后) → onPartialReply(C...) → final
+  // 精确模拟用户报告的真实场景（修复后时序）：
+  //   用户问题 → 中途文本A(推理) → deliver(tool)→flushSegment立即发A → [工具执行]
+  //   → 中途文本B(推理) → deliver(tool)→flushSegment立即发B → [工具执行]
+  //   → 最终回复C(推理) → 兜底finalize发C
+  //
+  // 关键：flushSegment 在工具【开始时】(deliver kind=tool) 触发，而非工具结束后
+  // (onAssistantMessageStart)。对齐 telegram prepareAnswerLaneForToolProgress。
+  // 这样工具执行期间用户已收到前置文本，不再等到下一段推理。
 
-  // 段A：第一段开始 + 累积
-  await ctrl.flushSegment(); // 段A 开始（无内容，空跳过）
+  // 段A：累积（第一段开始 flushSegment 空跳过）
+  await ctrl.flushSegment();
   await ctrl.onPartialReply("中途文本A");
   await flush();
+  assert.strictEqual(staticSendCalls.length, 0, "段A 累积期间不应发送");
 
-  // 段B：工具调用后新一段开始 → flushSegment 立即发段A
+  // 工具1开始 → flushSegment 立即发段A（不等工具执行完）
   await ctrl.flushSegment();
   await flush();
+  assert.deepStrictEqual(staticSendCalls, ["中途文本A"], "段A 应在工具开始时立即发送");
+
+  // [工具1执行期间] —— 用户已收到段A，无延迟
+
+  // 段B：新一段推理累积
   await ctrl.onPartialReply("中途文本B");
   await flush();
 
-  // 段C：又一次工具调用后 → flushSegment 立即发段B
+  // 工具2开始 → flushSegment 立即发段B
   await ctrl.flushSegment();
   await flush();
+  assert.deepStrictEqual(staticSendCalls, ["中途文本A", "中途文本B"], "段B 应在工具开始时立即发送");
+
+  // 最终回复C 累积
   await ctrl.onPartialReply("最终回复C");
   await flush();
 
@@ -232,7 +244,7 @@ await test("静态: 多工具调用多段推理 — onAssistantMessageStart 驱�
   assert.deepStrictEqual(
     staticSendCalls,
     ["中途文本A", "中途文本B", "最终回复C"],
-    "应按段顺序逐条发送：A在B开始时发，B在C开始时发，C在兜底finalize发",
+    "应按段顺序逐条发送：A/B在各自工具开始时立即发，C在兜底finalize发",
   );
   assert.strictEqual(ctrl.currentPhase, "done", "最终应为 done");
   assert.strictEqual(openStreamCalls, 0, "静态模式全程不应调用 openStream");
