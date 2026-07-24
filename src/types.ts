@@ -152,8 +152,19 @@ export interface QQBotAccountConfig {
    *   - { mode: "off" }      关闭
    *
    * 注意：仅 C2C（私聊）支持流式消息 API。
+   *
+   * sendMode 控制文本下发通道（仅 mode="partial" 时生效）：
+   *   - "stream"  QQ 流式打印机（默认）：同一条消息内容不断变长，打字机效果
+   *   - "static"  流结束时用一条普通 sendText 发送完整文本：无打字机，
+   *               partial 接收逻辑（状态机/串行/去重）保持不变，仅替换下发通道。
+   *               适合不想要打字机效果、只想收到一条完整回复的场景。
    */
-  streaming?: boolean | { mode: 'partial' | 'off' };
+  streaming?:
+    | boolean
+    | {
+        mode: 'partial' | 'off';
+        sendMode?: 'stream' | 'static';
+      };
   /**
    * STT (语音转文字) 配置
    * 配置后，收到语音消息时会自动调用 STT 服务转录为文字

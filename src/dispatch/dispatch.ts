@@ -294,6 +294,29 @@ function createStreamingController(
     log?.error(`cannot enable streaming — gateway not running`);
     return null;
   }
+
+  // sendMode: 默认 'stream'（QQ 流式打印机），可选 'static'（普通 sendText 收尾）
+  const streamingCfg = account.config?.streaming as
+    | { sendMode?: 'stream' | 'static' }
+    | undefined;
+  const sendMode = streamingCfg?.sendMode === 'static' ? 'static' : 'stream';
+
+  // static 模式：finalize 收尾时用一条普通 sendText 发完整文本
+  const sendStatic = sendMode === 'static'
+    ? async (fullText: string) => {
+        const result = await sendText({
+          to: envelope.senderId,
+          text: fullText,
+          accountId: account.accountId,
+          replyToId: envelope.messageId,
+          account,
+        });
+        if (result.error) {
+          log?.error(`static sendText failed: ${result.error}`);
+        }
+      }
+    : undefined;
+
   return new StreamingController({
     gateway: gw,
     target: {
@@ -304,6 +327,8 @@ function createStreamingController(
     accountId: account.accountId,
     replyToId: envelope.messageId,
     log,
+    sendMode,
+    sendStatic,
   });
 }
 

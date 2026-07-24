@@ -20,12 +20,26 @@ import type { QQBotGateway } from '../gateway/qqbot-gateway.js';
 
 export type StreamingPhase = 'idle' | 'streaming' | 'done' | 'failed';
 
+export type StreamingSendMode = 'stream' | 'static';
+
 export interface StreamingControllerDeps {
   gateway: QQBotGateway;
   target: ReplyTarget;
   accountId: string;
   replyToId: string;
   log?: PluginLogger;
+  /**
+   * 文本下发通道：
+   *   - 'stream'（默认）QQ 流式打印机：openStream/update/complete
+   *   - 'static'           流结束时用一条普通 sendText 发完整文本
+   * partial 接收逻辑（状态机/串行/去重）在两种模式下完全一致。
+   */
+  sendMode?: StreamingSendMode;
+  /**
+   * static 模式专用：在 finalize 收尾时把累积的完整文本一次性发出。
+   * stream 模式下不使用。未提供时 static 模式将降级为 shouldFallbackToStatic。
+   */
+  sendStatic?: (fullText: string) => Promise<void>;
 }
 
 // ── 控制器 ──
@@ -47,6 +61,9 @@ export class StreamingController {
   private chain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly deps: StreamingControllerDeps) {}
+
+  /** 是否走静态（普通 sendText）下发通道 */
+  private get isStaticMode(): boolean { return this.deps.sendMode === 'static'; }
 
   // ── 公共访问器 ──
 
@@ -138,7 +155,25 @@ export class StreamingController {
   private async handleFinalize(): Promise<void> {
     if (this.isTerminal) return;
 
-    // 用已下发文本收尾 — 不用框架 deliver 的文本（框架可能追加 ⚠️ 标记）
+    // 静态模式：用累积的完整文本一次性 sendStatic 收尾
+    if (this.isStaticMode) {
+      if (this.sentChunkCount > 0 && this.lastAcceptedFull && this.deps.sendStatic) {
+        await this.completeSession();
+        // completeSession 内部 sendStatic 失败会先转 failed，此处不可回退为 done
+        if (!this.isTerminal) {
+          this.transition('done', 'finalize');
+          this.deps.log?.info(`static done chunks=${this.sentChunkCount} chars=${this.lastAcceptedFull.length}`);
+        }
+      } else if (this.sentChunkCount > 0 && this.lastAcceptedFull) {
+        // 未提供 sendStatic → 降级标记，由上层兜底发送
+        this.transition('failed', 'finalize:no_sendstatic');
+      } else {
+        this.transition('failed', 'finalize:fallback');
+      }
+      return;
+    }
+
+    // stream 模式：用已下发文本收尾 — 不用框架 deliver 的文本（框架可能追加 ⚠️ 标记）
     if (this.session) {
       await this.completeSession();
       this.transition('done', 'finalize');
@@ -157,6 +192,19 @@ export class StreamingController {
   // ── QQ 交互 ──
 
   private async sendUpdate(text: string): Promise<void> {
+    // 静态模式：仅累积文本到内存，不发任何网络请求；
+    // 收尾时由 completeSession 一次性调用 sendStatic 发送完整文本。
+    if (this.isStaticMode) {
+      if (this.phase === 'idle') {
+        this.transition('streaming', 'first_chunk');
+        this.deps.log?.info(`static accumulate (firstChunk=${text.length})`);
+      }
+      this.lastAcceptedFull = text;
+      this.sentChunkCount++;
+      return;
+    }
+
+    // stream 模式：打开/复用流式会话并下发分片
     if (!this.session) {
       this.session = this.deps.gateway.openStream(this.deps.target, this.deps.replyToId);
       this.transition('streaming', 'first_chunk');
@@ -174,6 +222,21 @@ export class StreamingController {
   }
 
   private async completeSession(reason?: string): Promise<void> {
+    // 静态模式：把累积的完整文本一次性发出
+    if (this.isStaticMode) {
+      if (this.deps.sendStatic && this.lastAcceptedFull) {
+        this.deps.log?.info(`static send (sent=${this.sentChunkCount} chars=${this.lastAcceptedFull.length} reason=${reason ?? 'done'})`);
+        try {
+          await this.deps.sendStatic(this.lastAcceptedFull);
+        } catch (err) {
+          this.deps.log?.error(`static send failed: ${err instanceof Error ? err.message : String(err)}`);
+          this.transition('failed', 'static_send_error');
+        }
+      }
+      return;
+    }
+
+    // stream 模式：关闭流式会话，发送 DONE 帧
     if (!this.session) return;
     this.deps.log?.info(`completing stream (sent=${this.sentChunkCount} chars=${this.lastAcceptedFull.length} reason=${reason ?? 'done'})`);
     try {
