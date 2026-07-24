@@ -161,26 +161,69 @@ await test("静态: 空文本不发送内容，0 分片触发降级", async () =
   assert.strictEqual(ctrl.shouldFallbackToStatic, true, "0 分片应触发降级兜底");
 });
 
-await test("静态: 工具调用后新回复 — 旧文本先发、新文本再累积", async () => {
+await test("静态: 工具调用后新回复 — 旧文本立即发，controller 不进终态可继续", async () => {
   const ctrl = makeController({ sendMode: "static" });
 
-  // 第一段回复
+  // 第一段推理（持续增长的全量文本）
   await ctrl.onPartialReply("第一段回复");
   await flush();
-  // 模型重置（工具调用后，文本变短且前缀不匹配）→ 触发 new_reply
+  assert.strictEqual(staticSendCalls.length, 0, "累积阶段不应发送");
+  assert.strictEqual(ctrl.isTerminal, false, "累积阶段应为非终态");
+
+  // 模拟框架在工具调用后从短文本重新 onPartialReply → 触发 new_reply
   await ctrl.onPartialReply("第二段");
   await flush();
+
+  // 旧文本应在新回复检测时立即发送，而非等到后续
+  assert.deepStrictEqual(staticSendCalls, ["第一段回复"], "旧文本应在 new_reply 时立即发送");
+  assert.strictEqual(ctrl.isTerminal, false, "new_reply 后 controller 应保持非终态，可继续累积");
+
+  // 新文本继续累积
   await ctrl.onPartialReply("第二段回复内容");
   await flush();
+  assert.strictEqual(staticSendCalls.length, 1, "新文本累积阶段不应额外发送");
+
+  // turn 结束兜底 finalize 发最后一段
+  await ctrl.finalize();
+  assert.deepStrictEqual(staticSendCalls, ["第一段回复", "第二段回复内容"], "最后一段应在 finalize 发送");
+  assert.strictEqual(ctrl.currentPhase, "done", "finalize 后应为 done");
+});
+
+await test("静态: 多工具调用多段推理 — 逐段即时发送（无延迟无丢失）", async () => {
+  const ctrl = makeController({ sendMode: "static" });
+
+  // 时序模拟真实场景（工具调用后框架从更短的文本重新开始 onPartialReply）：
+  //   "正在查询您的邮件…" (累积段2)
+  //     → tool (被 dispatch 跳过，不 finalize)
+  //   "查到3封" (新回复，长度回退 → new_reply，触发段2立即发送)
+  //     → tool
+  //   "已删除" (新回复，长度回退 → new_reply，触发段3立即发送)
+  //     → 兜底 finalize 发段4
+  //
+  // dispatch 在 static 模式下不对 tool/final 事件调 finalize，
+  // 故 controller 全程靠 new_reply 自主分段 + 最后一次兜底 finalize。
+
+  await ctrl.onPartialReply("正在查询您的邮件…"); // 段2 累积
+  await flush();
+
+  await ctrl.onPartialReply("查到3封"); // 长度回退 → new_reply，段2 立即发
+  await flush();
+
+  await ctrl.onPartialReply("已删除"); // 长度回退 → new_reply，段3 立即发
+  await flush();
+
+  // turn 结束后的兜底 finalize
   await ctrl.finalize();
 
-  // 旧文本在 new_reply 时先 sendStatic 一次，新文本在 finalize 再 sendStatic 一次
-  assert.ok(staticSendCalls.length >= 2, `新回复应触发分段发送，实际 ${staticSendCalls.length}`);
-  assert.ok(
-    staticSendCalls.includes("第一段回复"),
-    "旧回复文本应已发送",
+  // 关键断言：逐段即时，顺序严格
+  assert.deepStrictEqual(
+    staticSendCalls,
+    ["正在查询您的邮件…", "查到3封", "已删除"],
+    "应按段顺序逐条发送：段2在段3开始时发，段3在段4开始时发，段4在兜底finalize发",
   );
-  assert.strictEqual(staticSendCalls[staticSendCalls.length - 1], "第二段回复内容", "最后应为新回复全文");
+  assert.strictEqual(ctrl.currentPhase, "done", "最终应为 done");
+  // 全程不应调用任何流式 API
+  assert.strictEqual(openStreamCalls, 0, "静态模式不应调用 openStream");
 });
 
 await test("静态: abort 时不发送文本", async () => {

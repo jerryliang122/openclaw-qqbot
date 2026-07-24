@@ -65,6 +65,13 @@ export class StreamingController {
   /** 是否走静态（普通 sendText）下发通道 */
   private get isStaticMode(): boolean { return this.deps.sendMode === 'static'; }
 
+  /**
+   * 是否处于 static 下发模式（公开访问器，供 dispatch 协同判断）。
+   * static 模式下 dispatch 不应在 tool/final 事件提前 finalize，
+   * 由 controller 靠 new_reply 检测自主分段，避免终态与发送延迟。
+   */
+  get isStaticSendMode(): boolean { return this.isStaticMode; }
+
   // ── 公共访问器 ──
 
   get currentPhase(): StreamingPhase { return this.phase; }

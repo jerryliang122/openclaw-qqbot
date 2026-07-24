@@ -224,8 +224,13 @@ export async function dispatchToOpenClaw(
                     }
 
                     // ── 2. 流式路径：流式已启动且未降级 → 跳过静态发送 ──
-                    if (streamingController?.hasStarted && !streamingController.shouldFallbackToStatic) {
-                      if (kind !== 'block') await streamingController.finalize();
+                    if (streamingController?.hasStarted && !streamingController?.shouldFallbackToStatic) {
+                      // static 模式：靠 controller 的 new_reply 检测自主分段发送，
+                      // 此处不 finalize（finalize 会进入终态并造成发送延迟/后续丢失）。
+                      // stream 模式：tool/final 时收尾当前打字机流（原行为）。
+                      if (kind !== 'block' && !streamingController.isStaticSendMode) {
+                        await streamingController.finalize();
+                      }
                       if (!streamingController.shouldFallbackToStatic) return;
                       dlog?.warn(`streaming fallback to static`);
                     }
