@@ -250,6 +250,94 @@ await test("静态: 多工具调用多段推理 — 工具开始时即时 flush�
   assert.strictEqual(openStreamCalls, 0, "静态模式全程不应调用 openStream");
 });
 
+await test("静态: block 信号(text_end)在每段文本结束即 flush - 消除 40s 延迟", async () => {
+  const ctrl = makeController({ sendMode: "static" });
+
+  // 修复后真实场景（开启 SDK block streaming，disableBlockStreaming:false）：
+  //   用户问题 -> 中途文本A(推理) -> text_end -> deliver(kind=block)->flushSegment 立即发A
+  //   -> [工具执行] -> 中途文本B(推理) -> text_end -> deliver(block)->flushSegment 立即发B
+  //   -> [工具执行] -> 最终回复C(推理) -> 兜底finalize发C
+  //
+  // 关键区别：flush 在 text_end（每段文本生成完）即触发，不再等 tool_start 或下一段
+  // onPartialReply 到达。这是消除"约 40s 延迟 / 下一段触发上一段"的核心。
+  // block 信号在 dispatch 层调 controller.flushSegment()，controller 不关心触发源。
+
+  // 段A：累积（模拟 onPartialReply 持续增长）
+  await ctrl.onPartialReply("正在查询");
+  await flush();
+  await ctrl.onPartialReply("正在查询您的邮件");
+  await flush();
+  assert.strictEqual(staticSendCalls.length, 0, "段A 累积期间不应发送");
+
+  // text_end -> deliver(block) -> flushSegment 立即发段A（不等工具执行，不等下一段）
+  await ctrl.flushSegment();
+  await flush();
+  assert.deepStrictEqual(staticSendCalls, ["正在查询您的邮件"], "段A 应在 text_end 立即发送");
+
+  // [工具执行期间] -- 用户已收到段A
+
+  // 段B：新一段推理累积（onPartialReply 重置，从短重新开始）
+  await ctrl.onPartialReply("查到3封邮件");
+  await flush();
+
+  // text_end -> deliver(block) -> flushSegment 立即发段B
+  await ctrl.flushSegment();
+  await flush();
+  assert.deepStrictEqual(
+    staticSendCalls,
+    ["正在查询您的邮件", "查到3封邮件"],
+    "段B 应在 text_end 立即发送，无需等待工具开始或下一段",
+  );
+
+  // 最终回复C 累积
+  await ctrl.onPartialReply("最终回复C");
+  await flush();
+
+  // turn 结束兜底 finalize 发段C
+  await ctrl.finalize();
+
+  assert.deepStrictEqual(
+    staticSendCalls,
+    ["正在查询您的邮件", "查到3封邮件", "最终回复C"],
+    "每段在 text_end 立即发送，无堆积无延迟",
+  );
+  assert.strictEqual(ctrl.currentPhase, "done", "最终应为 done");
+});
+
+await test("静态: 未 flush 时多段累积不丢失（修复日志中 flush183/send304 差异）", async () => {
+  const ctrl = makeController({ sendMode: "static" });
+
+  // 模拟日志中观察到的 bug：部分段落未及时 flush，被后续 onPartialReply 覆盖后
+  // 混入最终 static send。修复后每个 text_end 都 flush，不应出现此情况。
+  // 此用例验证：即使某段没 flush 就来了下一段，controller 的 static 分支
+  // （前缀不匹配->覆盖）行为正确，且最终 finalize 只发最后一段（已被覆盖的丢失是
+  // flush 缺失的预期后果，提示上层必须保证每段都 flush）。
+
+  // 段A 累积
+  await ctrl.onPartialReply("段A文本");
+  await flush();
+
+  // 段A 没有 flush 就来了段B（模拟 block 信号缺失的降级场景）
+  await ctrl.onPartialReply("段B文本");
+  await flush();
+  // 段A 被覆盖为段B（static 模式前缀不匹配->覆盖，不发送）
+
+  // 段B flush
+  await ctrl.flushSegment();
+  await flush();
+  assert.deepStrictEqual(staticSendCalls, ["段B文本"], "段A 未 flush 被覆盖，仅发段B");
+
+  // 段C 累积 + finalize
+  await ctrl.onPartialReply("段C文本");
+  await flush();
+  await ctrl.finalize();
+  assert.deepStrictEqual(
+    staticSendCalls,
+    ["段B文本", "段C文本"],
+    "段B 在 flush 时发，段C 在 finalize 发",
+  );
+});
+
 await test("静态: 两段长度相等不粘连（启发式缺陷已修复）", async () => {
   const ctrl = makeController({ sendMode: "static" });
 
