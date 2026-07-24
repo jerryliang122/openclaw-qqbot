@@ -227,13 +227,15 @@ export async function dispatchToOpenClaw(
                       }
                     }
 
-                    // ── 2. 流式路径：流式已启动且未降级 → 跳过静态发送 ──
+                    // ── 2. 流式路径：流式已启动且未降级 -> 跳过静态发送 ──
                     if (streamingController?.hasStarted && !streamingController?.shouldFallbackToStatic) {
                       if (streamingController.isStaticSendMode) {
-                        // static 模式：工具调用开始时立即 flush 已累积的中途文本
-                        // （对齐 telegram prepareAnswerLaneForToolProgress），避免工具执行
-                        // 期间文本堆积、直到下一段推理才发送的延迟。不进终态，可继续累积。
-                        if (kind === 'tool') {
+                        // static 模式：在"文本段结束/工具开始"边界立即 flush 已累积文本。
+                        // - block: 框架 text_end 信号（一段文本生成完），不受 verbose 控制，
+                        //   是最可靠的早期 flush 时机（对齐 telegram onBlockReplyQueued rotate）。
+                        // - tool: 工具调用开始（需 verbose 启用才触发，作为 block 的补充）。
+                        // 不进终态，可继续累积下一段。避免文本堆积到下一段推理才发送的延迟。
+                        if (kind === 'block' || kind === 'tool') {
                           await streamingController.flushSegment();
                         }
                         // static 模式不 finalize（finalize 会进入终态并造成后续丢失）
