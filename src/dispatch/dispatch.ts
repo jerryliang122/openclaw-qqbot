@@ -229,10 +229,16 @@ export async function dispatchToOpenClaw(
 
                     // ── 2. 流式路径：流式已启动且未降级 → 跳过静态发送 ──
                     if (streamingController?.hasStarted && !streamingController?.shouldFallbackToStatic) {
-                      // static 模式：靠 controller 的 new_reply 检测自主分段发送，
-                      // 此处不 finalize（finalize 会进入终态并造成发送延迟/后续丢失）。
-                      // stream 模式：tool/final 时收尾当前打字机流（原行为）。
-                      if (kind !== 'block' && !streamingController.isStaticSendMode) {
+                      if (streamingController.isStaticSendMode) {
+                        // static 模式：工具调用开始时立即 flush 已累积的中途文本
+                        // （对齐 telegram prepareAnswerLaneForToolProgress），避免工具执行
+                        // 期间文本堆积、直到下一段推理才发送的延迟。不进终态，可继续累积。
+                        if (kind === 'tool') {
+                          await streamingController.flushSegment();
+                        }
+                        // static 模式不 finalize（finalize 会进入终态并造成后续丢失）
+                      } else if (kind !== 'block') {
+                        // stream 模式：tool/final 时收尾当前打字机流（原行为）
                         await streamingController.finalize();
                       }
                       if (!streamingController.shouldFallbackToStatic) return;
@@ -244,15 +250,9 @@ export async function dispatchToOpenClaw(
                       return;
                     }
 
-                    // ── 4. tool 媒体：立即转发 ──
+                    // ── 4. tool 媒体：立即转发（static 流式路径已在上方 flush 文本）──
                     if (kind === 'tool') {
                       await forwardMediaUrls(payload, deliverCtx, deliveredMediaUrls, dlog);
-                      // static 模式：工具调用开始时立即把已累积的中途文本发出（对齐
-                      // telegram prepareAnswerLaneForToolProgress），避免工具执行期间
-                      // 文本一直堆积、直到下一段推理才发送的延迟。
-                      if (streamingController?.isStaticSendMode) {
-                        await streamingController.flushSegment();
-                      }
                       return;
                     }
 
