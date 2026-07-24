@@ -109,6 +109,34 @@ export class StreamingController {
     return this.chain as Promise<void>;
   }
 
+  /**
+   * static 模式：把当前累积段立即发出并重置缓冲，**不进入终态**。
+   * 供框架 onAssistantMessageStart 回调调用（工具调用后新一段推理开始时触发）。
+   * 对齐 telegram rotateLaneForNewMessage：固化旧段 + 开始新段。
+   * 无累积内容时跳过（第一段开始时 lastAcceptedFull 为空）。
+   */
+  flushSegment(): Promise<void> {
+    this.chain = this.chain.then(async () => {
+      if (this.isTerminal || !this.isStaticMode) return;
+      if (this.lastAcceptedFull && this.deps.sendStatic) {
+        this.deps.log?.info(`flush segment chars=${this.lastAcceptedFull.length}`);
+        try {
+          await this.deps.sendStatic(this.lastAcceptedFull);
+        } catch (err) {
+          this.deps.log?.error(`flushSegment send failed: ${err instanceof Error ? err.message : String(err)}`);
+          this.transition('failed', 'flush_send_error');
+          return;
+        }
+        // 重置缓冲，开始新一段累积（保持 streaming 态，不进终态）
+        this.lastAcceptedFull = '';
+      }
+    }).catch((err) => {
+      this.deps.log?.error(`flushSegment error: ${err instanceof Error ? err.message : String(err)}`);
+      this.transition('failed', 'flush_error');
+    });
+    return this.chain as Promise<void>;
+  }
+
   async abort(reason?: string): Promise<void> {
     if (this.isTerminal) return;
     this.deps.log?.warn(`aborting stream reason=${reason ?? 'manual'} sent=${this.sentChunkCount}`);
@@ -140,7 +168,17 @@ export class StreamingController {
       return;
     }
 
-    // 前缀不匹配 — 长度回退 → 新回复（工具调用后）
+    // static 模式：分段由框架 onAssistantMessageStart 明确驱动（flushSegment）。
+    // 前缀不匹配时视为新一段开始 → 直接覆盖累积（不发送，发送由 flushSegment 负责）。
+    // 不依赖"长度回退"启发式（长度相等时会误判为追加导致文本粘连）。
+    if (this.isStaticMode) {
+      this.deps.log?.info(`static new segment: lastAccepted=${this.lastAcceptedFull.length}→chunk=${text.length}`);
+      this.lastAcceptedFull = text;
+      this.sentChunkCount++;
+      return;
+    }
+
+    // stream 模式：前缀不匹配 — 长度回退 → 新回复（工具调用后）
     if (text.length < this.lastAcceptedFull.length) {
       this.deps.log?.info(`new reply: lastAccepted=${this.lastAcceptedFull.length}→chunk=${text.length}`);
       await this.completeSession('new_reply');

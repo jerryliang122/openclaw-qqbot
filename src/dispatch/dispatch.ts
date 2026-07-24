@@ -169,6 +169,10 @@ export async function dispatchToOpenClaw(
               onPartialReply: async (p: { text?: string }) => {
                 if (p.text) await streamingController.onPartialReply(p.text);
               },
+              // static 模式：工具调用后新一段推理开始时，把上一段立即发出
+              onAssistantMessageStart: streamingController.isStaticSendMode
+                ? async () => { await streamingController.flushSegment(); }
+                : undefined,
             }
           : {}),
       },
@@ -263,6 +267,11 @@ export async function dispatchToOpenClaw(
                     onPartialReply: async (p: { text?: string }) => {
                       if (p.text) await streamingController.onPartialReply(p.text);
                     },
+                    // static 模式：工具调用后新一段推理开始时，把上一段立即发出
+                    // （对齐 telegram rotateLaneForNewMessage）。stream 模式不传，保持原行为。
+                    onAssistantMessageStart: streamingController.isStaticSendMode
+                      ? async () => { await streamingController.flushSegment(); }
+                      : undefined,
                   }
                 : {}),
             },
