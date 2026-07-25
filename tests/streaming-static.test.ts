@@ -250,17 +250,17 @@ await test("静态: 多工具调用多段推理 — 工具开始时即时 flush�
   assert.strictEqual(openStreamCalls, 0, "静态模式全程不应调用 openStream");
 });
 
-await test("静态: block 信号(text_end)在每段文本结束即 flush - 消除 40s 延迟", async () => {
+await test("静态: onToolStart(工具开始前)触发 flush - 消除文本延迟", async () => {
   const ctrl = makeController({ sendMode: "static" });
 
-  // 修复后真实场景（开启 SDK block streaming，disableBlockStreaming:false）：
-  //   用户问题 -> 中途文本A(推理) -> text_end -> deliver(kind=block)->flushSegment 立即发A
-  //   -> [工具执行] -> 中途文本B(推理) -> text_end -> deliver(block)->flushSegment 立即发B
-  //   -> [工具执行] -> 最终回复C(推理) -> 兜底finalize发C
+  // 修复后真实场景（对齐 telegram 模式一：disableBlockStreaming:true 绕开 coalescer）：
+  //   用户问题 -> 中途文本A(推理累积) -> onToolStart(工具开始前)->flushSegment 立即发A
+  //   -> [工具执行] -> 中途文本B(推理累积) -> onToolStart(工具开始前)->flushSegment 立即发B
+  //   -> [工具执行] -> 最终回复C(推理累积) -> 兜底finalize发C
   //
-  // 关键区别：flush 在 text_end（每段文本生成完）即触发，不再等 tool_start 或下一段
-  // onPartialReply 到达。这是消除"约 40s 延迟 / 下一段触发上一段"的核心。
-  // block 信号在 dispatch 层调 controller.flushSegment()，controller 不关心触发源。
+  // 关键区别：flush 由 onToolStart（工具开始执行前）触发，绕开 SDK block streaming 的
+  // coalescer（minChars=800/idleMs=1000 buffer 会造成延迟）。controller 不关心触发源，
+  // 这里直接调 flushSegment() 模拟 dispatch 层 onToolStart 回调。
 
   // 段A：累积（模拟 onPartialReply 持续增长）
   await ctrl.onPartialReply("正在查询");
@@ -269,10 +269,10 @@ await test("静态: block 信号(text_end)在每段文本结束即 flush - 消�
   await flush();
   assert.strictEqual(staticSendCalls.length, 0, "段A 累积期间不应发送");
 
-  // text_end -> deliver(block) -> flushSegment 立即发段A（不等工具执行，不等下一段）
+  // onToolStart(工具开始前) -> flushSegment 立即发段A（不等工具执行完，不等下一段）
   await ctrl.flushSegment();
   await flush();
-  assert.deepStrictEqual(staticSendCalls, ["正在查询您的邮件"], "段A 应在 text_end 立即发送");
+  assert.deepStrictEqual(staticSendCalls, ["正在查询您的邮件"], "段A 应在 onToolStart 立即发送");
 
   // [工具执行期间] -- 用户已收到段A
 
@@ -280,13 +280,13 @@ await test("静态: block 信号(text_end)在每段文本结束即 flush - 消�
   await ctrl.onPartialReply("查到3封邮件");
   await flush();
 
-  // text_end -> deliver(block) -> flushSegment 立即发段B
+  // onToolStart(工具开始前) -> flushSegment 立即发段B
   await ctrl.flushSegment();
   await flush();
   assert.deepStrictEqual(
     staticSendCalls,
     ["正在查询您的邮件", "查到3封邮件"],
-    "段B 应在 text_end 立即发送，无需等待工具开始或下一段",
+    "段B 应在 onToolStart 立即发送，无需等待工具执行完或下一段",
   );
 
   // 最终回复C 累积
@@ -299,7 +299,33 @@ await test("静态: block 信号(text_end)在每段文本结束即 flush - 消�
   assert.deepStrictEqual(
     staticSendCalls,
     ["正在查询您的邮件", "查到3封邮件", "最终回复C"],
-    "每段在 text_end 立即发送，无堆积无延迟",
+    "每段在 onToolStart/finalize 立即发送，无堆积无延迟",
+  );
+  assert.strictEqual(ctrl.currentPhase, "done", "最终应为 done");
+});
+
+await test("静态: 纯长文本段(无工具调用)靠 finalize 整段发", async () => {
+  const ctrl = makeController({ sendMode: "static" });
+
+  // static 模式设计取舍：纯长文本回复（无工具调用打断）没有 onToolStart 边界，
+  // 文本会一直累积到 turn 结束，由 finalize 一次性发送（整段一条消息）。
+  // 这是符合预期的行为——static 模式本就是"整段文本一次发"。
+
+  // 模型持续生成一段长文本，期间无 onToolStart
+  await ctrl.onPartialReply("这是一段");
+  await flush();
+  await ctrl.onPartialReply("这是一段较长的");
+  await flush();
+  await ctrl.onPartialReply("这是一段较长的完整回复文本");
+  await flush();
+  assert.strictEqual(staticSendCalls.length, 0, "纯文本累积期间不应发送（无工具边界）");
+
+  // turn 结束 finalize 把整段一次发出
+  await ctrl.finalize();
+  assert.deepStrictEqual(
+    staticSendCalls,
+    ["这是一段较长的完整回复文本"],
+    "纯长文本段应在 finalize 时整段发送",
   );
   assert.strictEqual(ctrl.currentPhase, "done", "最终应为 done");
 });
@@ -308,7 +334,7 @@ await test("静态: 未 flush 时多段累积不丢失（修复日志中 flush18
   const ctrl = makeController({ sendMode: "static" });
 
   // 模拟日志中观察到的 bug：部分段落未及时 flush，被后续 onPartialReply 覆盖后
-  // 混入最终 static send。修复后每个 text_end 都 flush，不应出现此情况。
+  // 混入最终 static send。修复后每个工具边界都 flush，不应出现此情况。
   // 此用例验证：即使某段没 flush 就来了下一段，controller 的 static 分支
   // （前缀不匹配->覆盖）行为正确，且最终 finalize 只发最后一段（已被覆盖的丢失是
   // flush 缺失的预期后果，提示上层必须保证每段都 flush）。

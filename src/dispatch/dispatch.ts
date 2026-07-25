@@ -146,6 +146,8 @@ export async function dispatchToOpenClaw(
             dlog?.debug(`deliver kind=${kind ?? 'none'} textLen=${text.length} voice=${!!payload.audioAsVoice} media=${hasMedia}`);
 
             // ── 1. block: 媒体/语音立即发送，文本留给流式 ──
+            // 注：static 模式已显式 disableBlockStreaming:true，kind:'block' 不会再触发；
+            // 此分支保留以兼容 stream 模式与未来变化。
             if (kind === 'block') {
               if (payload.audioAsVoice) {
                 await deliverReply(payload, info, deliverCtx);
@@ -157,12 +159,11 @@ export async function dispatchToOpenClaw(
             // ── 2. 流式路径：流式已启动且未降级 -> 跳过静态发送 ──
             if (streamingController?.hasStarted && !streamingController?.shouldFallbackToStatic) {
               if (streamingController.isStaticSendMode) {
-                // static 模式：在“文本段结束/工具开始”边界立即 flush 已累积文本。
-                // - block: 框架 text_end 信号（一段文本生成完），不受 verbose 控制，
-                //   是最可靠的早期 flush 时机（对齐 telegram onBlockReplyQueued rotate）。
-                // - tool: 工具调用开始（需 verbose 启用才触发，作为 block 的补充）。
-                // 不进终态，可继续累积下一段。避免文本堆积到下一段推理才发送的延迟。
-                if (kind === 'block' || kind === 'tool') {
+                // static 模式：flush 主路径由 onToolStart 驱动（工具开始前，绕开 SDK
+                // block streaming 的 coalescer，避免 minChars=800/idleMs=1000 buffer 延迟）。
+                // 这里仅兜底：deliver(kind:'tool') 时再 flush 一次（controller 内部去重，
+                // buffer 已空时 flushSegment 无副作用）。
+                if (kind === 'tool') {
                   await streamingController.flushSegment();
                 }
                 // static 模式不 finalize（finalize 会进入终态并造成后续丢失）
@@ -197,16 +198,27 @@ export async function dispatchToOpenClaw(
       replyOptions: {
         abortSignal: ctx.signal,
         runId: envelope.messageId,
-        // static 模式开启 SDK block streaming（同 inboundRun 分支）。
         ...(streamingController?.isStaticSendMode
-          ? { disableBlockStreaming: false }
+          ? {
+              // 对齐 telegram 模式一：显式关掉 SDK block streaming，绕开 coalescer
+              // （minChars=800/idleMs=1000 的 buffer 会造成文本延迟）。
+              // 文本由 onPartialReply 累积，边界由 onToolStart 自己监听 flush。
+              disableBlockStreaming: true,
+              // 让 onToolStart 在 verbose 关闭时也能触发
+              // （默认受 requiresToolSummaryVisibility 门控，verbose off 时不触发）
+              allowToolLifecycleWhenProgressHidden: true,
+              // 工具【开始执行前】触发：把已累积的上一段文本立即发出
+              // （不等工具执行完，对齐 telegram prepareAnswerLaneForToolProgress）
+              onToolStart: async () => { await streamingController.flushSegment(); },
+            }
           : {}),
         ...(streamingController
           ? {
               onPartialReply: async (p: { text?: string }) => {
                 if (p.text) await streamingController.onPartialReply(p.text);
               },
-              // 兜底：block 信号未覆盖的边界仍由 onAssistantMessageStart 触发分段
+              // 兜底：onToolStart 未覆盖的边界（如纯文本段切换、部分 provider 事件差异）
+              // 仍由 onAssistantMessageStart 触发分段。stream 模式不传，保持原行为。
               onAssistantMessageStart: streamingController.isStaticSendMode
                 ? async () => { await streamingController.flushSegment(); }
                 : undefined,
@@ -256,6 +268,8 @@ export async function dispatchToOpenClaw(
                     dlog?.debug(`deliver kind=${kind ?? 'none'} textLen=${text.length} voice=${!!payload.audioAsVoice} media=${hasMedia}`);
 
                     // ── 1. block: 媒体/语音立即发送，文本留给流式 ──
+                    // 注：static 模式已显式 disableBlockStreaming:true，kind:'block' 不会再触发；
+                    // 此分支保留以兼容 stream 模式与未来变化。
                     if (kind === 'block') {
                       if (payload.audioAsVoice) {
                         await deliverReply(payload, info, deliverCtx);
@@ -267,12 +281,11 @@ export async function dispatchToOpenClaw(
                     // ── 2. 流式路径：流式已启动且未降级 -> 跳过静态发送 ──
                     if (streamingController?.hasStarted && !streamingController?.shouldFallbackToStatic) {
                       if (streamingController.isStaticSendMode) {
-                        // static 模式：在"文本段结束/工具开始"边界立即 flush 已累积文本。
-                        // - block: 框架 text_end 信号（一段文本生成完），不受 verbose 控制，
-                        //   是最可靠的早期 flush 时机（对齐 telegram onBlockReplyQueued rotate）。
-                        // - tool: 工具调用开始（需 verbose 启用才触发，作为 block 的补充）。
-                        // 不进终态，可继续累积下一段。避免文本堆积到下一段推理才发送的延迟。
-                        if (kind === 'block' || kind === 'tool') {
+                        // static 模式：flush 主路径由 onToolStart 驱动（工具开始前，绕开 SDK
+                        // block streaming 的 coalescer，避免 minChars=800/idleMs=1000 buffer 延迟）。
+                        // 这里仅兜底：deliver(kind:'tool') 时再 flush 一次（controller 内部去重，
+                        // buffer 已空时 flushSegment 无副作用）。
+                        if (kind === 'tool') {
                           await streamingController.flushSegment();
                         }
                         // static 模式不 finalize（finalize 会进入终态并造成后续丢失）
@@ -307,13 +320,19 @@ export async function dispatchToOpenClaw(
             replyOptions: {
               abortSignal: ctx.signal,
               runId: envelope.messageId,
-              // static 模式开启 SDK block streaming：让框架在每段文本 text_end、
-              // 以及工具开始前 tool_start（onBlockReplyFlush force）可靠触发
-              // deliver(kind:'block')，从而立即 flushSegment 发出已累积文本，
-              // 不再“等下一段文本到达才发上一段”（消除约 40s 延迟）。
-              // stream 模式不开启：保持 QQ 打字机原行为，避免 block 与 update 重复投递。
               ...(streamingController?.isStaticSendMode
-                ? { disableBlockStreaming: false }
+                ? {
+                    // 对齐 telegram 模式一：显式关掉 SDK block streaming，绕开 coalescer
+                    // （minChars=800/idleMs=1000 的 buffer 会造成文本延迟）。
+                    // 文本由 onPartialReply 累积，边界由 onToolStart 自己监听 flush。
+                    disableBlockStreaming: true,
+                    // 让 onToolStart 在 verbose 关闭时也能触发
+                    // （默认受 requiresToolSummaryVisibility 门控，verbose off 时不触发）
+                    allowToolLifecycleWhenProgressHidden: true,
+                    // 工具【开始执行前】触发：把已累积的上一段文本立即发出
+                    // （不等工具执行完，对齐 telegram prepareAnswerLaneForToolProgress）
+                    onToolStart: async () => { await streamingController.flushSegment(); },
+                  }
                 : {}),
               ...(streamingController
                 ? {
