@@ -315,11 +315,15 @@ export function resolveQQBotAccount(
   };
 }
 
-/** 兼容旧版 streaming: boolean 格式 → { mode: "partial" | "off" }，对齐框架 schema */
+/** 兼容旧版 streaming: boolean 格式 → { mode: "partial" | "off" }，对齐框架 schema。
+ *  布尔 true 归一化为流式打印机（sendMode: "stream"，向后兼容默认行为）。 */
 function normalizeAccountConfig(raw: QQBotAccountConfig): QQBotAccountConfig {
   if (typeof (raw as any).streaming === 'boolean') {
     const { streaming, ...rest } = raw as any;
-    return { ...rest, streaming: { mode: streaming ? 'partial' : 'off' } };
+    return {
+      ...rest,
+      streaming: { mode: streaming ? 'partial' : 'off', sendMode: 'stream' },
+    };
   }
   return raw;
 }

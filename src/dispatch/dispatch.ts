@@ -137,38 +137,91 @@ export async function dispatchToOpenClaw(
       cfg,
       dispatcherOptions: {
         deliver: async (payload: DeliverPayload, info?: DeliverInfo) => {
-          const text = payload.text?.trim() ?? '';
-          // 低版本无 block/final 协议，流式启动后 final 仍需跳过（降级除外）
-          if (!payload.mediaUrl && !payload.mediaUrls?.length
-            && text
-            && (deliveredTexts.has(text)
-              || (streamingController?.hasStarted && !streamingController?.shouldFallbackToStatic))
-          ) {
-            return;
-          }
-          const filteredPayload = deliveredMediaUrls.size > 0
-            ? {
-                ...payload,
-                mediaUrl: payload.mediaUrl && !deliveredMediaUrls.has(payload.mediaUrl)
-                  ? payload.mediaUrl : undefined,
-                mediaUrls: payload.mediaUrls?.filter((u) => !deliveredMediaUrls.has(u)),
+          try {
+            // 与 inboundRun 分支保持一致的 kind 分支结构。
+            // 低版本 SDK 同样支持 deliver info.kind（dispatchReplyWithBufferedBlockDispatcher）。
+            const kind = (info as any)?.kind as string | undefined;
+            const text = payload.text?.trim() ?? '';
+            const hasMedia = !!(payload.mediaUrl || payload.mediaUrls?.length);
+            dlog?.debug(`deliver kind=${kind ?? 'none'} textLen=${text.length} voice=${!!payload.audioAsVoice} media=${hasMedia}`);
+
+            // ── 1. block: 媒体/语音立即发送，文本留给流式 ──
+            // 注：static 模式已显式 disableBlockStreaming:true，kind:'block' 不会再触发；
+            // 此分支保留以兼容 stream 模式与未来变化。
+            if (kind === 'block') {
+              if (payload.audioAsVoice) {
+                await deliverReply(payload, info, deliverCtx);
+              } else {
+                await forwardMediaUrls(payload, deliverCtx, deliveredMediaUrls, dlog);
               }
-            : payload;
-          await deliverReply(filteredPayload, info, deliverCtx);
-          if (text) deliveredTexts.add(text);
-          // 记录已投递媒体（流式路径可能已先发送）
-          for (const u of filteredPayload.mediaUrls ?? []) deliveredMediaUrls.add(u);
-          if (filteredPayload.mediaUrl) deliveredMediaUrls.add(filteredPayload.mediaUrl);
+            }
+
+            // ── 2. 流式路径：流式已启动且未降级 -> 跳过静态发送 ──
+            if (streamingController?.hasStarted && !streamingController?.shouldFallbackToStatic) {
+              if (streamingController.isStaticSendMode) {
+                // static 模式：flush 主路径由 onToolStart 驱动（工具开始前，绕开 SDK
+                // block streaming 的 coalescer，避免 minChars=800/idleMs=1000 buffer 延迟）。
+                // 这里仅兜底：deliver(kind:'tool') 时再 flush 一次（controller 内部去重，
+                // buffer 已空时 flushSegment 无副作用）。
+                if (kind === 'tool') {
+                  await streamingController.flushSegment();
+                }
+                // static 模式不 finalize（finalize 会进入终态并造成后续丢失）
+              } else if (kind !== 'block') {
+                // stream 模式：tool/final 时收尾当前打字机流（原行为）
+                await streamingController.finalize();
+              }
+              if (!streamingController.shouldFallbackToStatic) return;
+              dlog?.warn(`streaming fallback to static`);
+            }
+
+            // ── 3. 文本去重：同文本已发过 -> 跳过 ──
+            if (kind === 'final' && !hasMedia && text && deliveredTexts.has(text)) {
+              return;
+            }
+
+            // ── 4. tool 媒体：立即转发（static 流式路径已在上方 flush 文本）──
+            if (kind === 'tool') {
+              await forwardMediaUrls(payload, deliverCtx, deliveredMediaUrls, dlog);
+              return;
+            }
+
+            // ── 5. 默认路径：过滤已发媒体 + 发送 ──
+            const filteredPayload = filterDeliveredMedia(payload, deliveredMediaUrls);
+            await deliverReply(filteredPayload, info, deliverCtx);
+            if (text) deliveredTexts.add(text);
+          } catch (err) {
+            dlog?.error(`deliver error: ${err instanceof Error ? err.message : String(err)}`);
+          }
         },
       },
       replyOptions: {
         abortSignal: ctx.signal,
         runId: envelope.messageId,
+        ...(streamingController?.isStaticSendMode
+          ? {
+              // 对齐 telegram 模式一：显式关掉 SDK block streaming，绕开 coalescer
+              // （minChars=800/idleMs=1000 的 buffer 会造成文本延迟）。
+              // 文本由 onPartialReply 累积，边界由 onToolStart 自己监听 flush。
+              disableBlockStreaming: true,
+              // 让 onToolStart 在 verbose 关闭时也能触发
+              // （默认受 requiresToolSummaryVisibility 门控，verbose off 时不触发）
+              allowToolLifecycleWhenProgressHidden: true,
+              // 工具【开始执行前】触发：把已累积的上一段文本立即发出
+              // （不等工具执行完，对齐 telegram prepareAnswerLaneForToolProgress）
+              onToolStart: async () => { await streamingController.flushSegment(); },
+            }
+          : {}),
         ...(streamingController
           ? {
               onPartialReply: async (p: { text?: string }) => {
                 if (p.text) await streamingController.onPartialReply(p.text);
               },
+              // 兜底：onToolStart 未覆盖的边界（如纯文本段切换、部分 provider 事件差异）
+              // 仍由 onAssistantMessageStart 触发分段。stream 模式不传，保持原行为。
+              onAssistantMessageStart: streamingController.isStaticSendMode
+                ? async () => { await streamingController.flushSegment(); }
+                : undefined,
             }
           : {}),
       },
@@ -215,6 +268,8 @@ export async function dispatchToOpenClaw(
                     dlog?.debug(`deliver kind=${kind ?? 'none'} textLen=${text.length} voice=${!!payload.audioAsVoice} media=${hasMedia}`);
 
                     // ── 1. block: 媒体/语音立即发送，文本留给流式 ──
+                    // 注：static 模式已显式 disableBlockStreaming:true，kind:'block' 不会再触发；
+                    // 此分支保留以兼容 stream 模式与未来变化。
                     if (kind === 'block') {
                       if (payload.audioAsVoice) {
                         await deliverReply(payload, info, deliverCtx);
@@ -223,9 +278,21 @@ export async function dispatchToOpenClaw(
                       }
                     }
 
-                    // ── 2. 流式路径：流式已启动且未降级 → 跳过静态发送 ──
-                    if (streamingController?.hasStarted && !streamingController.shouldFallbackToStatic) {
-                      if (kind !== 'block') await streamingController.finalize();
+                    // ── 2. 流式路径：流式已启动且未降级 -> 跳过静态发送 ──
+                    if (streamingController?.hasStarted && !streamingController?.shouldFallbackToStatic) {
+                      if (streamingController.isStaticSendMode) {
+                        // static 模式：flush 主路径由 onToolStart 驱动（工具开始前，绕开 SDK
+                        // block streaming 的 coalescer，避免 minChars=800/idleMs=1000 buffer 延迟）。
+                        // 这里仅兜底：deliver(kind:'tool') 时再 flush 一次（controller 内部去重，
+                        // buffer 已空时 flushSegment 无副作用）。
+                        if (kind === 'tool') {
+                          await streamingController.flushSegment();
+                        }
+                        // static 模式不 finalize（finalize 会进入终态并造成后续丢失）
+                      } else if (kind !== 'block') {
+                        // stream 模式：tool/final 时收尾当前打字机流（原行为）
+                        await streamingController.finalize();
+                      }
                       if (!streamingController.shouldFallbackToStatic) return;
                       dlog?.warn(`streaming fallback to static`);
                     }
@@ -235,7 +302,7 @@ export async function dispatchToOpenClaw(
                       return;
                     }
 
-                    // ── 4. tool 媒体：立即转发 ──
+                    // ── 4. tool 媒体：立即转发（static 流式路径已在上方 flush 文本）──
                     if (kind === 'tool') {
                       await forwardMediaUrls(payload, deliverCtx, deliveredMediaUrls, dlog);
                       return;
@@ -253,11 +320,30 @@ export async function dispatchToOpenClaw(
             replyOptions: {
               abortSignal: ctx.signal,
               runId: envelope.messageId,
+              ...(streamingController?.isStaticSendMode
+                ? {
+                    // 对齐 telegram 模式一：显式关掉 SDK block streaming，绕开 coalescer
+                    // （minChars=800/idleMs=1000 的 buffer 会造成文本延迟）。
+                    // 文本由 onPartialReply 累积，边界由 onToolStart 自己监听 flush。
+                    disableBlockStreaming: true,
+                    // 让 onToolStart 在 verbose 关闭时也能触发
+                    // （默认受 requiresToolSummaryVisibility 门控，verbose off 时不触发）
+                    allowToolLifecycleWhenProgressHidden: true,
+                    // 工具【开始执行前】触发：把已累积的上一段文本立即发出
+                    // （不等工具执行完，对齐 telegram prepareAnswerLaneForToolProgress）
+                    onToolStart: async () => { await streamingController.flushSegment(); },
+                  }
+                : {}),
               ...(streamingController
                 ? {
                     onPartialReply: async (p: { text?: string }) => {
                       if (p.text) await streamingController.onPartialReply(p.text);
                     },
+                    // 兜底：block 信号未覆盖的边界（如部分 provider 不发 text_end）
+                    // 仍由 onAssistantMessageStart 触发分段。stream 模式不传，保持原行为。
+                    onAssistantMessageStart: streamingController.isStaticSendMode
+                      ? async () => { await streamingController.flushSegment(); }
+                      : undefined,
                   }
                 : {}),
             },
@@ -294,6 +380,29 @@ function createStreamingController(
     log?.error(`cannot enable streaming — gateway not running`);
     return null;
   }
+
+  // sendMode: 默认 'stream'（QQ 流式打印机），可选 'static'（普通 sendText 收尾）
+  const streamingCfg = account.config?.streaming as
+    | { sendMode?: 'stream' | 'static' }
+    | undefined;
+  const sendMode = streamingCfg?.sendMode === 'static' ? 'static' : 'stream';
+
+  // static 模式：finalize 收尾时用一条普通 sendText 发完整文本
+  const sendStatic = sendMode === 'static'
+    ? async (fullText: string) => {
+        const result = await sendText({
+          to: envelope.senderId,
+          text: fullText,
+          accountId: account.accountId,
+          replyToId: envelope.messageId,
+          account,
+        });
+        if (result.error) {
+          log?.error(`static sendText failed: ${result.error}`);
+        }
+      }
+    : undefined;
+
   return new StreamingController({
     gateway: gw,
     target: {
@@ -304,6 +413,8 @@ function createStreamingController(
     accountId: account.accountId,
     replyToId: envelope.messageId,
     log,
+    sendMode,
+    sendStatic,
   });
 }
 
