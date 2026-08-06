@@ -64,7 +64,7 @@ function createQQBotApprovalCapability(): ChannelApprovalCapability {
         accountId && accountId !== "default"
           ? `channels.qqbot.accounts.${accountId}`
           : "channels.qqbot";
-      return `QQBot native exec approvals are enabled by default. To restrict who can approve, configure \`${prefix}.execApprovals.approvers\` with QQ user OpenIDs.`;
+      return `QQBot native exec approvals are enabled by default. To restrict who can approve, configure \`${prefix}.allowFrom\` with QQ user OpenIDs. Use \`["*"]\` (or leave unset) to allow any user.`;
     },
     delivery: {
       hasConfiguredDmRoute: () => true,
