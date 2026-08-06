@@ -193,7 +193,9 @@ require removal.
 
 ### E. Removal list
 
-- Delete `src/features/approval-handler.ts` entirely.
+- Delete `src/features/approval-handler.ts` entirely, including the
+  `loadApprovalGatewayRuntime` dynamic-import path in
+  `src/adapter/gateway.ts`.
 - Delete `src/gateway/lifecycle.ts` import + register/unregister lines for
   `QQBotApprovalHandler` and `approvalLog`.
 - Delete `handleApproval` and its `getApprovalHandler` import in
@@ -306,36 +308,27 @@ Removed test files:
 6. Run `npm test` (or the equivalent per `package.json`) and `npm run lint`
    (or equivalent).
 7. Update `CHANGELOG.zh.md` with a fix entry describing the migration.
+   Note: minimum supported openclaw version is bumped; the dynamic-import
+   fallback for older builds is removed.
 8. Update `README.zh.md` to drop the "审批功能降级" footnote that no longer
    applies.
 
+## Decisions (resolved during review)
+
+1. **No click-side short ack.** The user picked option A: click → card
+   automatically switches to `visited_label` (✅ 已处理 / ❌ 已拒绝). Matches
+   the reference implementation in
+   `/root/openclaw/extensions/qqbot/src/bridge/approval/handler-runtime.ts`.
+   No additional reply is sent from the plugin. UX trade-off is documented
+   in `CHANGELOG.zh.md` under the fix entry.
+
+2. **No legacy fallback.** The plugin will drop the
+   `loadApprovalGatewayRuntime()` dynamic-import path entirely. Plugins
+   running on openclaw builds without `approval-delivery-runtime` will
+   report a startup error and the approval feature will be unavailable
+   (matches the documented behavior of the new SDK). `CHANGELOG.zh.md`
+   bumps the minimum supported openclaw version.
+
 ## Open Questions
 
-1. **"RPC + 短回复" UX is not natively supported.** The v2 runtime spec
-   exposes no click-side hook (`approval-handler-runtime-types-D67cLD0j.d.ts`).
-   `interactions.bindPending` runs on card delivery, not on click; the
-   reference implementation in
-   `/root/openclaw/extensions/qqbot/src/bridge/approval/handler-runtime.ts`
-   also omits a short ack. Click-side UX options:
-   - **A.** Drop the short ack. Click → card auto-switches to `visited_label`
-     (✅ 已处理 / ❌ 已拒绝). Matches the reference implementation.
-     Simplest.
-   - **B.** Send a short ack from `onDelivered` (delivery, not click). This
-     produces a "card + ack" pair on every approval, not just on click. Adds
-     noise for every request even when the user never interacts.
-   - **C.** Keep the legacy `onInteraction` listener in addition to the
-     capability, and send the short ack from the legacy path. This means
-     we own the INTERACTION routing and bypass the framework's resolver,
-     which fights the migration goal.
-   The user picked "RPC + 短回复" before we discovered this constraint.
-   We flag the trade-off and recommend **A** for this PR, with a separate
-   follow-up to investigate a future SDK extension if QQ users complain.
-
-2. **Should we keep a fallback path for older openclaw releases?**
-   The current `loadApprovalGatewayRuntime()` dynamic import lets the
-   plugin run on openclaw < 3.22 (which lacks approval-runtime). The new
-   `approval-delivery-runtime` exists in current builds but not in ancient
-   ones. If we want to keep the dynamic-import fallback, we need a feature
-   detection around `plugin-sdk/approval-delivery-runtime`. Recommendation:
-   drop the fallback in this PR — the legacy version is unsupported per
-   the openclaw release notes — and bump the documented minimum version.
+None.
