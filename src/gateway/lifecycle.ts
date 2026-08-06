@@ -4,7 +4,7 @@
  * 封装 startAccount / logoutAccount 的业务逻辑：
  * - 凭证恢复
  * - QQBotGateway 实例创建与注册
- * - Features 初始化（update-checker、approval-handler）
+ * - Features 初始化（update-checker）
  * - 登出时凭证清除
  */
 import type { OpenClawConfig } from 'openclaw/plugin-sdk/core';
@@ -18,7 +18,6 @@ import type { PluginLogger } from '../utils/plugin-logger.js';
 import { registerGateway, unregisterGateway, getGateway } from '../outbound/outbound-service.js';
 import { saveCredentialBackup, loadCredentialBackup } from '../features/credential-backup.js';
 import { triggerUpdateCheck } from '../features/update-checker.js';
-import { QQBotApprovalHandler, registerApprovalHandler, unregisterApprovalHandler, getApprovalHandler } from '../features/approval-handler.js';
 
 export interface StartAccountContext {
   account: ResolvedQQBotAccount;
@@ -102,27 +101,6 @@ export async function startAccountWithCredentialRecovery(ctx: StartAccountContex
 async function initFeatures(account: ResolvedQQBotAccount, cfg: any, log: PluginLogger): Promise<void> {
   // 1. 版本更新检测（后台预热，fire-and-forget）
   triggerUpdateCheck(log);
-
-  const existing = getApprovalHandler(account.accountId);
-  if (existing) {
-    await existing.stop();
-    unregisterApprovalHandler(account.accountId);
-  }
-  const approvalLog = log.child('approval');
-  try {
-    const handler = new QQBotApprovalHandler({
-      accountId: account.accountId,
-      appId: account.appId,
-      clientSecret: account.clientSecret,
-      cfg,
-      log: approvalLog,
-    });
-    registerApprovalHandler(account.accountId, handler);
-    await handler.start();
-    approvalLog.info('registered');
-  } catch (e) {
-    approvalLog.debug(`not available: ${e}`);
-  }
 }
 
 /**
@@ -133,7 +111,7 @@ async function initFeatures(account: ResolvedQQBotAccount, cfg: any, log: Plugin
  *
  * 实现策略：
  *   1. 主动调用 bot.stop() — 比 abort 信号更立刻、不依赖事件循环时机
- *   2. 注销 approval handler / gateway
+ *   2. 注销 gateway
  *   3. 立即返回；剩余资源（typing keepalive 定时器等）由 abort 信号触发收尾
  */
 export async function stopAccountGracefully(params: {
@@ -154,12 +132,6 @@ export async function stopAccountGracefully(params: {
   }
 
   unregisterGateway(accountId);
-  try {
-    const h = getApprovalHandler(accountId);
-    if (h) await h.stop();
-  } catch {
-  }
-  unregisterApprovalHandler(accountId);
 }
 
 /**
@@ -171,12 +143,6 @@ export async function logoutAndClearCredentials(params: {
 }): Promise<{ ok: boolean; cleared: boolean; envToken: boolean; loggedOut: boolean }> {
   const { accountId, cfg } = params;
   unregisterGateway(accountId);
-  try {
-    const h = getApprovalHandler(accountId);
-    if (h) await h.stop();
-  } catch {
-  }
-  unregisterApprovalHandler(accountId);
 
   const nextCfg = { ...cfg } as OpenClawConfig;
   const nextQQBot = cfg.channels?.qqbot ? { ...cfg.channels.qqbot } : undefined;

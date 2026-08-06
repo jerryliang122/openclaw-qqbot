@@ -34,7 +34,6 @@ import { normalizeTarget, isQQBotTarget } from './outbound/target.js';
 import { sanitizeQQBotText } from './outbound/sanitize.js';
 import { startAccountWithCredentialRecovery, logoutAndClearCredentials, stopAccountGracefully } from './gateway/lifecycle.js';
 import { loadCredentialBackup } from './features/credential-backup.js';
-import { isApprovalPayload, approvalStubs } from './features/approval-utils.js';
 import { qqbotOnboardingAdapter } from './features/onboarding.js';
 import { getQQBotApprovalCapability } from './features/approval/capability.js';
 import { stripMentionText } from './utils/mention.js';
@@ -229,7 +228,6 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
     },
     chunkerMode: 'markdown',
     textChunkLimit: TEXT_CHUNK_LIMIT,
-    shouldSuppressLocalPayloadPrompt: ({ payload }: any) => isApprovalPayload(payload),
     sendText: async ({ to, text, accountId, replyToId, cfg }) => {
       const account = resolveQQBotAccount(cfg, accountId ?? undefined);
       const outLog = createOutLog(account.accountId);
@@ -279,7 +277,6 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
   // ── 登录认证 ──
   auth: {
     login: qqbotLogin as any,
-    // 审批权限（从 approvalStubs 迁移）
     authorizeActorAction: () => ({ authorized: true } as const),
     getActionAvailabilityState: () => ({ kind: 'enabled' as const } as const),
   },
@@ -320,9 +317,6 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
 
   // ── 审批能力（v2 — 由 features/approval/capability 提供）──
   approvalCapability: getQQBotApprovalCapability(),
-
-  // ── 审批（stub — 实际由 features/approval-handler 处理）──
-  ...approvalStubs,
 };
 
 function resolveMCPAgentId(to: string, accountId: string, cfg: unknown, log?: PluginLogger): string | undefined {

@@ -12,7 +12,6 @@ import type { ResolvedQQBotAccount } from '../types.js';
 import type { PluginLogger } from '../utils/plugin-logger.js';
 import { dispatchToOpenClaw } from '../dispatch/index.js';
 import { runWithRequestContext } from '../request-context.js';
-import { getApprovalHandler } from '../features/approval-handler.js';
 import { recordKnownUser } from '../features/proactive.js';
 import { cacheMsgId } from '../features/msgid-cache.js';
 import { getAdapters } from '../adapter/resolve.js';
@@ -95,8 +94,6 @@ export async function handleInteraction(
     }
     return;
   }
-
-  await handleApproval(event, account, log, acknowledgeInteraction);
 }
 
 // ── Interaction 子处理 ──
@@ -147,63 +144,7 @@ async function handleConfigUpdate(
   }
 }
 
-async function handleApproval(
-  event: InteractionEvent,
-  account: ResolvedQQBotAccount,
-  log: PluginLogger,
-  ack: (id: string) => Promise<void>,
-): Promise<void> {
-  try { await ack(event.id); } catch { /* ignore */ }
-
-  const buttonData = event.data?.resolved?.button_data;
-  if (!buttonData?.startsWith('approve:')) return;
-
-  // 身份授权校验：操作者需在 allowFrom 白名单中
-  const operatorId = resolveOperatorId(event);
-  if (!isApprovalAuthorized(account, operatorId)) {
-    log.warn(`[approval] unauthorized operator=${operatorId ?? 'unknown'} account=${account.accountId}`);
-    return;
-  }
-
-  const parts = buttonData.split(':');
-  if (parts.length < 3) return;
-
-  const handler = getApprovalHandler(account.accountId);
-  if (!handler) return;
-
-  const approvalId = parts[1];
-  const decision = parts[2] as 'allow-once' | 'allow-always' | 'deny';
-  try { await handler.resolveApproval(approvalId, decision); } catch (err) {
-    log.error(`interaction approve error: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
 const CHANNEL_VER = getPackageVersion();
-
-// ── 审批授权校验 ──
-
-/**
- * 从交互事件中提取操作者身份标识。
- * QQ Bot 按钮回调事件中，操作者 openid 通常在 `user_openid` 或 `data.resolved.user_id` 字段。
- */
-function resolveOperatorId(event: InteractionEvent): string | undefined {
-  const evt = event as any;
-  return evt.user_openid
-    ?? evt.data?.resolved?.user_id
-    ?? evt.data?.resolved?.user_openid
-    ?? evt.openid;
-}
-
-/**
- * 校验操作者是否有权限执行审批操作。
- * 规则：allowFrom 为空或含 "*" → 开放；否则操作者必须在 allowFrom 中。
- */
-function isApprovalAuthorized(account: ResolvedQQBotAccount, operatorId?: string): boolean {
-  if (!operatorId) return false;
-  const allowFrom = account.config?.allowFrom ?? [];
-  if (!allowFrom.length || allowFrom.includes('*')) return true;
-  return allowFrom.includes(operatorId);
-}
 
 function buildClawCfg(
   requireMention: boolean,
