@@ -27,10 +27,10 @@
 Created:
 - `src/engine/approval/index.ts` — pure helpers: `buildExecApprovalText`, `buildPluginApprovalText`, `buildApprovalKeyboard`, `resolveApprovalTarget`, `parseApprovalButtonData`.
 - `src/engine/approval/index.test.ts` — vitest unit tests for the helpers above.
-- `src/bridge/approval/capability.ts` — `createQQBotApprovalCapability()` returning a `ChannelApprovalCapability`.
-- `src/bridge/approval/capability.test.ts` — vitest unit tests for capability availability + delivery suppression.
-- `src/bridge/approval/handler-runtime.ts` — `qqbotApprovalNativeRuntime` adapter implementing `ChannelApprovalNativeRuntimeSpec`.
-- `src/bridge/approval/handler-runtime.test.ts` — vitest unit tests for the adapter's presentation + transport.
+- `src/features/approval/capability.ts` — `createQQBotApprovalCapability()` returning a `ChannelApprovalCapability`.
+- `src/features/approval/capability.test.ts` — vitest unit tests for capability availability + delivery suppression.
+- `src/features/approval/handler-runtime.ts` — `qqbotApprovalNativeRuntime` adapter implementing `ChannelApprovalNativeRuntimeSpec`.
+- `src/features/approval/handler-runtime.test.ts` — vitest unit tests for the adapter's presentation + transport.
 
 Modified:
 - `src/channel.ts` — register `approvalCapability: getQQBotApprovalCapability()` on the `qqbotPlugin` object.
@@ -444,61 +444,126 @@ git commit -m "feat: add v2 approval pure helpers"
 
 ---
 
-## Task 2: Wire `approvalCapability` into `channel.ts`
-
-**Files:**
-- Modify: `src/channel.ts` (one line added in the `qqbotPlugin` object literal)
-
-**Interfaces:**
-- Consumes: `getQQBotApprovalCapability` from Task 3 (not yet imported here — use the import shape `import { getQQBotApprovalCapability } from "./bridge/approval/capability.js";` once Task 3 lands).
-
-- [ ] **Step 1: Add the import and field**
-
-In `src/channel.ts`, locate the `qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = { ... }` object literal and add (near `approvalCapability`-looking peers if any; otherwise before `groups:` or right after `config:`):
-
-```ts
-  approvalCapability: getQQBotApprovalCapability(),
-```
-
-Plus the import at the top:
-
-```ts
-import { getQQBotApprovalCapability } from "./bridge/approval/capability.js";
-```
-
-- [ ] **Step 2: Run typecheck to verify the import resolves (will FAIL until Task 3 lands)**
-
-```bash
-cd /root/openclaw-qqbot
-npx tsc --noEmit
-```
-
-Expected at this stage: `error TS2307: Cannot find module './bridge/approval/capability.js'`. We accept this; Task 3 fixes it.
-
-- [ ] **Step 3: Skip — defer the actual verification until Task 3**
-
-No commit yet. Task 3 will be the first commit that compiles `channel.ts` end-to-end.
-
 ---
 
-## Task 3: `bridge/approval/capability.ts` + `bridge/approval/handler-runtime.ts`
+## Task 3: `features/approval/capability.ts` + `features/approval/handler-runtime.ts` + register on `qqbotPlugin`
 
 **Files:**
-- Create: `src/bridge/approval/capability.ts`
-- Create: `src/bridge/approval/handler-runtime.ts`
+- Create: `src/features/approval/capability.ts`
+- Create: `src/features/approval/handler-runtime.ts`
+- Modify: `src/channel.ts` (add `approvalCapability: getQQBotApprovalCapability()` field + import)
+- Create: `src/features/approval/capability.test.ts`
+- Create: `src/features/approval/handler-runtime.test.ts`
+- Create: `src/exec-approvals.ts` (shim — this plugin doesn't have one)
+
+> **Plan amendment (post-review).** The original brief was authored against
+> the reference implementation at `/root/openclaw/extensions/qqbot/`, which
+> lives under `src/bridge/` and exposes `getMessageApi`/`accountToCreds`
+> helpers. This plugin's structure is flat (`src/features/`, `src/outbound/`,
+> `src/config.ts`, `src/bot-instance.ts`) and its only outbound API is
+> `getBotForAccount(accountId).sendTextWithKeyboard(target, content, keyboard)`
+> from the QQ Bot SDK. Task 3 has been rewritten to fit this plugin's actual
+> structure. Task 4's deletion list (Task 4 §Files) was rewritten to match.
 
 **Interfaces:**
-- Consumes: pure helpers from Task 1.
+- Consumes: pure helpers from Task 1 (`src/engine/approval/index.ts`).
 - Produces:
   - `getQQBotApprovalCapability(): ChannelApprovalCapability` (cached singleton).
   - `qqbotApprovalNativeRuntime: ChannelApprovalNativeRuntimeAdapter` (lazy-loaded by `capability.ts`).
 
-- [ ] **Step 1: Write the failing test for `capability.ts`**
+---
 
-Create `src/bridge/approval/capability.test.ts`:
+### Pre-flight (run before any code)
+
+```bash
+cd /root/openclaw-qqbot
+grep -n "export function getBotForAccount" src/bot-instance.ts
+grep -n "sendTextWithKeyboard" node_modules/@tencent-connect/qqbot-nodejs/dist/QQBot.d.ts
+grep -n "export.*resolveQQBotAccount" src/config.ts
+grep -n "export.*InlineKeyboard\|export.*KeyboardButton" src/types.ts
+```
+
+Expected:
+- `getBotForAccount` exists in `src/bot-instance.ts` and returns the SDK `QQBot` instance.
+- `sendTextWithKeyboard(target, content, keyboard): Promise<MessageResponse>` exists in the SDK.
+- `resolveQQBotAccount(cfg, accountId): ResolvedQQBotAccount` exists in `src/config.ts:258`.
+- `src/types.ts` exports `InlineKeyboard` and `KeyboardButton`.
+
+If any check fails, STOP and report BLOCKED with the specific discrepancy.
+
+---
+
+### Step 1: Create `src/exec-approvals.ts` shim
+
+This plugin has no `exec-approvals.ts`. Create a thin shim:
 
 ```ts
-import { describe, expect, it } from "vitest";
+// src/exec-approvals.ts
+import type { ChannelApprovalKind } from "openclaw/plugin-sdk/approval-handler-runtime";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { resolveQQBotAccount } from "./config.js";
+
+export function resolveQQBotExecApprovalConfig(_params: {
+  cfg: OpenClawConfig;
+  accountId?: string | null;
+}): unknown {
+  return undefined;
+}
+
+export function isQQBotExecApprovalClientEnabled(_params: {
+  cfg: OpenClawConfig;
+  accountId?: string | null;
+}): boolean {
+  return true;
+}
+
+export function shouldHandleQQBotExecApprovalRequest(_params: {
+  cfg: OpenClawConfig;
+  accountId?: string | null;
+  request: unknown;
+}): boolean {
+  return true;
+}
+
+export function matchesQQBotApprovalAccount(_params: {
+  cfg: OpenClawConfig;
+  accountId?: string | null;
+  request: unknown;
+}): boolean {
+  return true;
+}
+
+export function authorizeQQBotApprovalAction(params: {
+  cfg: OpenClawConfig;
+  accountId?: string | null;
+  senderId?: string | null;
+  approvalKind: ChannelApprovalKind;
+}): { authorized: boolean; reason?: string } {
+  const account = resolveQQBotAccount(params.cfg, params.accountId);
+  if (!account.enabled || account.secretSource === "none") {
+    return { authorized: false, reason: "Account is not enabled." };
+  }
+  const allowFrom = account.config.allowFrom ?? [];
+  if (allowFrom.length === 0 || allowFrom.includes("*")) {
+    return { authorized: true };
+  }
+  return allowFrom.includes(params.senderId ?? "")
+    ? { authorized: true }
+    : { authorized: false, reason: "Sender is not in allowFrom." };
+}
+```
+
+The shim's account shape matches `ResolvedQQBotAccount.config.allowFrom?: string[]`
+(`src/types.ts:84`).
+
+---
+
+### Step 2: Write the failing test for `capability.ts`
+
+Create `src/features/approval/capability.test.ts`:
+
+```ts
+import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../exec-approvals.js", () => ({
   resolveQQBotExecApprovalConfig: vi.fn(),
@@ -507,19 +572,16 @@ vi.mock("../../exec-approvals.js", () => ({
   authorizeQQBotApprovalAction: vi.fn(),
   matchesQQBotApprovalAccount: vi.fn(),
 }));
+vi.mock("../../config.js", () => ({
+  resolveQQBotAccount: vi.fn(),
+}));
 
 import {
   resolveQQBotExecApprovalConfig,
-  isQQBotExecApprovalClientEnabled,
-  shouldHandleQQBotExecApprovalRequest,
   authorizeQQBotApprovalAction,
 } from "../../exec-approvals.js";
-import { resolveQQBotAccount } from "../config.js";
+import { resolveQQBotAccount } from "../../config.js";
 import { getQQBotApprovalCapability } from "./capability.js";
-
-vi.mock("../config.js", () => ({
-  resolveQQBotAccount: vi.fn(),
-}));
 
 const baseCfg = {} as any;
 
@@ -532,7 +594,11 @@ describe("getQQBotApprovalCapability", () => {
     } as any);
 
     const cap = getQQBotApprovalCapability();
-    const state = cap.getActionAvailabilityState?.({ cfg: baseCfg, accountId: "a", action: "approve" });
+    const state = cap.getActionAvailabilityState?.({
+      cfg: baseCfg,
+      accountId: "a",
+      action: "approve",
+    });
     expect(state).toEqual({ kind: "enabled" });
   });
 
@@ -544,7 +610,11 @@ describe("getQQBotApprovalCapability", () => {
     } as any);
 
     const cap = getQQBotApprovalCapability();
-    const state = cap.getActionAvailabilityState?.({ cfg: baseCfg, accountId: "a", action: "approve" });
+    const state = cap.getActionAvailabilityState?.({
+      cfg: baseCfg,
+      accountId: "a",
+      action: "approve",
+    });
     expect(state).toEqual({ kind: "disabled" });
   });
 
@@ -569,18 +639,18 @@ describe("getQQBotApprovalCapability", () => {
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+### Step 3: Run test to verify it fails
 
 ```bash
 cd /root/openclaw-qqbot
-npx vitest run src/bridge/approval/capability.test.ts
+npx vitest run src/features/approval/capability.test.ts
 ```
 
 Expected: FAIL with "Cannot find module './capability.js'".
 
-- [ ] **Step 3: Implement `capability.ts`**
+### Step 4: Implement `capability.ts`
 
-Create `src/bridge/approval/capability.ts`:
+Create `src/features/approval/capability.ts`:
 
 ```ts
 import { createChannelApprovalCapability } from "openclaw/plugin-sdk/approval-delivery-runtime";
@@ -590,17 +660,15 @@ import { resolveApprovalRequestSessionConversation } from "openclaw/plugin-sdk/a
 import type { ChannelApprovalCapability } from "openclaw/plugin-sdk/channel-contract";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { resolveQQBotAccount } from "../../config.js";
 import { resolveApprovalTarget } from "../../engine/approval/index.js";
 import {
+  authorizeQQBotApprovalAction,
   isQQBotExecApprovalClientEnabled,
   matchesQQBotApprovalAccount,
-  shouldHandleQQBotExecApprovalRequest,
   resolveQQBotExecApprovalConfig,
-  authorizeQQBotApprovalAction,
+  shouldHandleQQBotExecApprovalRequest,
 } from "../../exec-approvals.js";
-import { ensurePlatformAdapter } from "../bootstrap.js";
-import { resolveQQBotAccount } from "../config.js";
-import { getBridgeLogger } from "../logger.js";
 
 function hasExecApprovalConfig(params: { cfg: OpenClawConfig; accountId?: string | null }) {
   return resolveQQBotExecApprovalConfig(params) !== undefined;
@@ -635,7 +703,9 @@ function shouldHandleRequest(params: {
 }
 
 function resolveNativeDeliveryState(params: { cfg: OpenClawConfig; accountId?: string | null }) {
-  return isNativeDeliveryEnabled(params) ? { kind: "enabled" as const } : { kind: "disabled" as const };
+  return isNativeDeliveryEnabled(params)
+    ? { kind: "enabled" as const }
+    : { kind: "disabled" as const };
 }
 
 function createQQBotApprovalCapability(): ChannelApprovalCapability {
@@ -659,11 +729,7 @@ function createQQBotApprovalCapability(): ChannelApprovalCapability {
         const accountId =
           normalizeOptionalString(input.target?.accountId) ??
           normalizeOptionalString(input.request?.request?.turnSourceAccountId);
-        const result = isNativeDeliveryEnabled({ cfg: input.cfg, accountId });
-        getBridgeLogger().debug?.(
-          `[qqbot:approval] shouldSuppressForwardingFallback channel=${channel} accountId=${accountId} → ${result}`,
-        );
-        return result;
+        return isNativeDeliveryEnabled({ cfg: input.cfg, accountId });
       },
     },
     native: {
@@ -693,24 +759,12 @@ function createQQBotApprovalCapability(): ChannelApprovalCapability {
     },
     nativeRuntime: createLazyChannelApprovalNativeRuntimeAdapter({
       eventKinds: ["exec", "plugin"],
-      isConfigured: ({ cfg, accountId }) => {
-        const result = isNativeDeliveryEnabled({ cfg, accountId });
-        getBridgeLogger().debug?.(
-          `[qqbot:approval] nativeRuntime.isConfigured accountId=${accountId} → ${result}`,
-        );
-        return result;
-      },
-      shouldHandle: ({ cfg, accountId, request }) => {
-        const result = shouldHandleRequest({ cfg, accountId, request: request as never });
-        getBridgeLogger().debug?.(
-          `[qqbot:approval] nativeRuntime.shouldHandle accountId=${accountId} → ${result}`,
-        );
-        return result;
-      },
+      isConfigured: ({ cfg, accountId }) => isNativeDeliveryEnabled({ cfg, accountId }),
+      shouldHandle: ({ cfg, accountId, request }) =>
+        shouldHandleRequest({ cfg, accountId, request: request as never }),
       load: async () => {
-        ensurePlatformAdapter();
-        return (await import("./handler-runtime.js"))
-          .qqbotApprovalNativeRuntime as unknown as ChannelApprovalNativeRuntimeAdapter;
+        const mod = await import("./handler-runtime.js");
+        return mod.qqbotApprovalNativeRuntime as unknown as ChannelApprovalNativeRuntimeAdapter;
       },
     }),
   });
@@ -726,104 +780,41 @@ export function getQQBotApprovalCapability(): ChannelApprovalCapability {
 }
 ```
 
-NOTE on imports — the project may use different module paths:
-- `../bootstrap.js`, `../config.js`, `../logger.js` — relative to `src/bridge/approval/`, so they resolve to `src/bridge/bootstrap.js`, `src/bridge/config.js`, `src/bridge/logger.js`. Verify these exist; rename if the actual filenames differ (e.g., `bootstrap.ts` compiled to `.js`).
-- `../../engine/approval/index.js` — resolves to `src/engine/approval/index.ts` compiled.
-- `../../exec-approvals.js` — resolves to `src/exec-approvals.ts` if it exists. If it does not exist in this plugin (the reference implementation has it; this plugin might not), use the inlined `authorizeQQBotApprovalAction` defined in the next bullet.
+### Step 5: Implement `handler-runtime.ts`
 
-If `src/exec-approvals.ts` is missing in this plugin, create it as a thin shim:
+Create `src/features/approval/handler-runtime.ts`:
 
 ```ts
-// src/exec-approvals.ts
-import type { ChannelApprovalKind } from "openclaw/plugin-sdk/approval-handler-runtime";
-import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { resolveQQBotAccount } from "./bridge/config.js";
-
-export function resolveQQBotExecApprovalConfig(_params: {
-  cfg: OpenClawConfig;
-  accountId?: string | null;
-}): unknown {
-  return undefined;
-}
-
-export function isQQBotExecApprovalClientEnabled(_params: {
-  cfg: OpenClawConfig;
-  accountId?: string | null;
-}): boolean {
-  return true;
-}
-
-export function shouldHandleQQBotExecApprovalRequest(_params: {
-  cfg: OpenClawConfig;
-  accountId?: string | null;
-  request: unknown;
-}): boolean {
-  return true;
-}
-
-export function authorizeQQBotApprovalAction(params: {
-  cfg: OpenClawConfig;
-  accountId?: string | null;
-  senderId?: string | null;
-  approvalKind: ChannelApprovalKind;
-}): { authorized: boolean; reason?: string } {
-  const account = resolveQQBotAccount(params.cfg, params.accountId);
-  if (!account.enabled || account.secretSource === "none") {
-    return { authorized: false, reason: "Account is not enabled." };
-  }
-  const allowFrom = account.config?.allowFrom ?? [];
-  if (allowFrom.length === 0 || allowFrom.includes("*")) {
-    return { authorized: true };
-  }
-  return allowFrom.includes(params.senderId ?? "")
-    ? { authorized: true }
-    : { authorized: false, reason: "Sender is not in allowFrom." };
-}
-
-export function matchesQQBotApprovalAccount(_params: {
-  cfg: OpenClawConfig;
-  accountId?: string | null;
-  request: unknown;
-}): boolean {
-  return true;
-}
-```
-
-Adjust `account.config` shape and `resolveQQBotAccount` return type to match this plugin's actual types — read `src/bridge/config.ts` or wherever account resolution lives.
-
-- [ ] **Step 4: Implement `handler-runtime.ts`**
-
-Create `src/bridge/approval/handler-runtime.ts`:
-
-```ts
+import type { ReplyTarget } from "@tencent-connect/qqbot-nodejs";
 import type { ChannelApprovalNativeRuntimeSpec } from "openclaw/plugin-sdk/approval-handler-runtime";
 import { createChannelApprovalNativeRuntimeAdapter } from "openclaw/plugin-sdk/approval-handler-runtime";
 import type { ChannelApprovalNativeRuntimeAdapter } from "openclaw/plugin-sdk/approval-handler-runtime";
 import { resolveApprovalRequestSessionConversation } from "openclaw/plugin-sdk/approval-native-runtime";
+import { getBotForAccount } from "../../bot-instance.js";
+import { resolveQQBotAccount } from "../../config.js";
 import {
   buildApprovalKeyboard,
   buildExecApprovalText,
   buildPluginApprovalText,
   resolveApprovalTarget,
   type ApprovalDecision,
+  type ApprovalTarget,
 } from "../../engine/approval/index.js";
-import { getMessageApi, accountToCreds } from "../../engine/messaging/sender.js";
-import type { ChatScope, InlineKeyboard, MessageResponse } from "../../engine/types.js";
+import type { InlineKeyboard } from "../../types.js";
 import {
+  isQQBotExecApprovalClientEnabled,
   matchesQQBotApprovalAccount,
   resolveQQBotExecApprovalConfig,
-  isQQBotExecApprovalClientEnabled,
   shouldHandleQQBotExecApprovalRequest,
 } from "../../exec-approvals.js";
-import { ensurePlatformAdapter } from "../bootstrap.js";
-import { resolveQQBotAccount } from "../config.js";
-import { getBridgeLogger } from "../logger.js";
 
 type PendingPayload = { text: string; keyboard: InlineKeyboard };
-type PreparedTarget = { type: ChatScope; id: string };
-type PendingEntry = { messageId?: string; targetType: ChatScope; targetId: string };
+type PreparedTarget = ApprovalTarget;
+type PendingEntry = { messageId?: string; targetType: ApprovalTarget["type"]; targetId: string };
 
-function resolveQQTarget(request: { request: { sessionKey?: string | null; turnSourceTo?: string | null } }): PreparedTarget | null {
+function resolveQQTarget(request: {
+  request: { sessionKey?: string | null; turnSourceTo?: string | null };
+}): PreparedTarget | null {
   const sessionKey = request.request.sessionKey ?? null;
   const turnSourceTo = request.request.turnSourceTo ?? null;
   const direct = resolveApprovalTarget(sessionKey, turnSourceTo);
@@ -834,7 +825,7 @@ function resolveQQTarget(request: { request: { sessionKey?: string | null; turnS
     bundledFallback: true,
   });
   if (sessionConversation?.id) {
-    const kind: ChatScope = sessionConversation.kind === "group" ? "group" : "c2c";
+    const kind: ApprovalTarget["type"] = sessionConversation.kind === "group" ? "group" : "c2c";
     return { type: kind, id: sessionConversation.id };
   }
   return null;
@@ -858,7 +849,7 @@ const qqbotApprovalRuntimeSpec: ChannelApprovalNativeRuntimeSpec<
       if (resolveQQBotExecApprovalConfig({ cfg, accountId }) !== undefined) {
         return shouldHandleQQBotExecApprovalRequest({ cfg, accountId, request });
       }
-      const target = resolveQQTarget(request as { request: { sessionKey?: string | null; turnSourceTo?: string | null } });
+      const target = resolveQQTarget(request as never);
       if (!target) return false;
       return matchesQQBotApprovalAccount({
         cfg,
@@ -873,13 +864,15 @@ const qqbotApprovalRuntimeSpec: ChannelApprovalNativeRuntimeSpec<
         view.approvalKind === "exec"
           ? buildExecApprovalText(view, nowMs)
           : buildPluginApprovalText(view, nowMs);
-      const allowedDecisions = (view.actions ?? []).map(
+      const allowedDecisions: readonly ApprovalDecision[] = (view.actions ?? []).map(
         (a) => a.decision as ApprovalDecision,
       );
       const keyboard = buildApprovalKeyboard(
         view.approvalId,
         view.approvalKind,
-        allowedDecisions.length > 0 ? allowedDecisions : ["allow-once", "allow-always", "deny"],
+        allowedDecisions.length > 0
+          ? allowedDecisions
+          : ["allow-once", "allow-always", "deny"],
       );
       return { text, keyboard };
     },
@@ -888,24 +881,27 @@ const qqbotApprovalRuntimeSpec: ChannelApprovalNativeRuntimeSpec<
   },
   transport: {
     prepareTarget: ({ request }) => {
-      const target = resolveQQTarget(request as { request: { sessionKey?: string | null; turnSourceTo?: string | null } });
+      const target = resolveQQTarget(request as never);
       if (!target) return null;
       return { target, dedupeKey: `${target.type}:${target.id}` };
     },
-    deliverPending: async ({ cfg, accountId, preparedTarget, pendingPayload }) => {
-      ensurePlatformAdapter();
-      const account = resolveQQBotAccount(cfg, accountId ?? undefined);
-      const creds = accountToCreds(account);
-      const messageApi = getMessageApi(account.appId);
-      let result: MessageResponse;
+    deliverPending: async ({ accountId, preparedTarget, pendingPayload }) => {
+      const bot = getBotForAccount(accountId ?? "");
+      const replyTarget: ReplyTarget = {
+        scope: preparedTarget.type,
+        targetId: preparedTarget.id,
+      };
       try {
-        result = await messageApi.sendMessage(
-          preparedTarget.type,
-          preparedTarget.id,
+        const result = await bot.sendTextWithKeyboard(
+          replyTarget,
           pendingPayload.text,
-          creds,
-          { inlineKeyboard: pendingPayload.keyboard },
+          pendingPayload.keyboard,
         );
+        return {
+          messageId: result.id,
+          targetType: preparedTarget.type,
+          targetId: preparedTarget.id,
+        };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(
@@ -913,11 +909,6 @@ const qqbotApprovalRuntimeSpec: ChannelApprovalNativeRuntimeSpec<
           { cause: err },
         );
       }
-      return {
-        messageId: result.id,
-        targetType: preparedTarget.type,
-        targetId: preparedTarget.id,
-      };
     },
   },
 };
@@ -927,18 +918,22 @@ export const qqbotApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdap
 ) as unknown as ChannelApprovalNativeRuntimeAdapter;
 ```
 
-NOTE: `getMessageApi` and `accountToCreds` come from `src/engine/messaging/sender.ts`. If this plugin does not have that file yet, look for the equivalent in `src/outbound/` or `src/bot-instance.ts`. The reference implementation has these; this plugin's `outbound/` may need a small adapter.
+### Step 6: Write the failing test for `handler-runtime.ts`
 
-- [ ] **Step 5: Write the failing test for `handler-runtime.ts`**
-
-Create `src/bridge/approval/handler-runtime.test.ts`:
+Create `src/features/approval/handler-runtime.test.ts`:
 
 ```ts
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("../../engine/messaging/sender.js", () => ({
-  getMessageApi: vi.fn(),
-  accountToCreds: vi.fn(),
+vi.mock("../../bot-instance.js", () => ({
+  getBotForAccount: vi.fn(),
+}));
+vi.mock("../../config.js", () => ({
+  resolveQQBotAccount: vi.fn().mockReturnValue({
+    enabled: true,
+    secretSource: "config",
+    appId: "app",
+  }),
 }));
 vi.mock("../../exec-approvals.js", () => ({
   resolveQQBotExecApprovalConfig: vi.fn().mockReturnValue(undefined),
@@ -946,15 +941,11 @@ vi.mock("../../exec-approvals.js", () => ({
   shouldHandleQQBotExecApprovalRequest: vi.fn(),
   matchesQQBotApprovalAccount: vi.fn().mockReturnValue(true),
 }));
-vi.mock("../bootstrap.js", () => ({ ensurePlatformAdapter: vi.fn() }));
-vi.mock("../config.js", () => ({
-  resolveQQBotAccount: vi.fn().mockReturnValue({ enabled: true, secretSource: "config", appId: "app" }),
-}));
 
-import { getMessageApi, accountToCreds } from "../../engine/messaging/sender.js";
+import { getBotForAccount } from "../../bot-instance.js";
 import { qqbotApprovalNativeRuntime } from "./handler-runtime.js";
 
-const sendMessage = vi.fn();
+const sendTextWithKeyboard = vi.fn();
 
 const baseView = {
   approvalId: "exec:abc",
@@ -1002,10 +993,10 @@ describe("qqbotApprovalNativeRuntime", () => {
     expect(expired).toEqual({ kind: "leave" });
   });
 
-  it("deliverPending calls sendMessage with inlineKeyboard", async () => {
-    vi.mocked(getMessageApi).mockReturnValue({ sendMessage } as any);
-    vi.mocked(accountToCreds).mockReturnValue({} as any);
-    sendMessage.mockResolvedValue({ id: "msg1" });
+  it("deliverPending calls sendTextWithKeyboard with ReplyTarget and keyboard", async () => {
+    const bot = { sendTextWithKeyboard };
+    vi.mocked(getBotForAccount).mockReturnValue(bot as any);
+    sendTextWithKeyboard.mockResolvedValue({ id: "msg1" });
 
     const adapter = qqbotApprovalNativeRuntime as any;
     await adapter.spec.transport.deliverPending({
@@ -1014,30 +1005,48 @@ describe("qqbotApprovalNativeRuntime", () => {
       request: { id: "x", request: {} },
       approvalKind: "exec",
       view: baseView,
-      pendingPayload: { text: "hello", keyboard: { content: { rows: [{ buttons: [] }] } } as any },
+      pendingPayload: {
+        text: "hello",
+        keyboard: { content: { rows: [{ buttons: [] }] } } as any,
+      },
     });
 
-    expect(sendMessage).toHaveBeenCalledWith(
-      "c2c",
-      "U1",
+    expect(getBotForAccount).toHaveBeenCalledWith("a");
+    expect(sendTextWithKeyboard).toHaveBeenCalledWith(
+      { scope: "c2c", targetId: "U1" },
       "hello",
-      {},
-      expect.objectContaining({ inlineKeyboard: expect.any(Object) }),
+      expect.objectContaining({ content: expect.any(Object) }),
     );
   });
 });
 ```
 
-- [ ] **Step 6: Run both tests; iterate until they pass**
+### Step 7: Run both tests; iterate until they pass
 
 ```bash
 cd /root/openclaw-qqbot
-npx vitest run src/bridge/approval/capability.test.ts src/bridge/approval/handler-runtime.test.ts
+npx vitest run src/features/approval/capability.test.ts src/features/approval/handler-runtime.test.ts
 ```
 
-Expected: PASS for both files. If mocks fail because `vi` is not imported, prepend `import { vi } from "vitest";` to each test file.
+Expected: PASS for both files.
 
-- [ ] **Step 7: Run typecheck and full test suite**
+### Step 8: Wire `approvalCapability` into `src/channel.ts`
+
+Add to the top of `src/channel.ts`:
+
+```ts
+import { getQQBotApprovalCapability } from "./features/approval/capability.js";
+```
+
+Add a field to the `qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = { ... }` object literal, near `groups:` / `messaging:` / `outbound:`:
+
+```ts
+  approvalCapability: getQQBotApprovalCapability(),
+```
+
+If `src/channel.ts` does not already export `qqbotPlugin` or has a different shape (read first), report BLOCKED with the diff.
+
+### Step 9: Run typecheck and full test suite
 
 ```bash
 cd /root/openclaw-qqbot
@@ -1045,21 +1054,25 @@ npx tsc --noEmit
 npx vitest run
 ```
 
-Expected: typecheck passes (or only fails in legacy tests we are about to delete). Existing tests pass; new tests pass.
+Expected: typecheck passes. New tests pass. Pre-existing test failures (8 files under `tests/` per the Task 1 report) reproduce — they are unrelated.
 
-- [ ] **Step 8: Commit**
+### Step 10: Commit
 
 ```bash
-git add src/bridge/approval/capability.ts src/bridge/approval/capability.test.ts src/bridge/approval/handler-runtime.ts src/bridge/approval/handler-runtime.test.ts
+git add src/exec-approvals.ts \
+        src/features/approval/capability.ts \
+        src/features/approval/capability.test.ts \
+        src/features/approval/handler-runtime.ts \
+        src/features/approval/handler-runtime.test.ts \
+        src/channel.ts
 git commit -m "feat: add v2 approval capability and native runtime adapter"
 ```
 
 ---
 
-## Task 4: Wire capability into `channel.ts` and remove legacy code
+## Task 4: Remove legacy approval-handler
 
 **Files:**
-- Modify: `src/channel.ts` (add `approvalCapability` field + import)
 - Delete: `src/features/approval-handler.ts`
 - Delete: `src/features/approval-utils.ts`
 - Modify: `src/gateway/lifecycle.ts` (remove approval-handler lines)
@@ -1068,13 +1081,13 @@ git commit -m "feat: add v2 approval capability and native runtime adapter"
 
 - [ ] **Step 1: Verify `src/channel.ts` already imports `getQQBotApprovalCapability`**
 
-The import + field were added in Task 2. Confirm by reading `src/channel.ts`:
+The import + field were added in Task 3. Confirm by reading `src/channel.ts`:
 
 ```bash
 grep -n "approvalCapability\|getQQBotApprovalCapability" /root/openclaw-qqbot/src/channel.ts
 ```
 
-Expected: two matches — one for the import line and one for the field assignment. If only one or zero, re-add per Task 2 Step 1.
+Expected: two matches — one for the import line and one for the field assignment. If only one or zero, re-add per Task 3 Step 8.
 
 - [ ] **Step 2: Delete legacy files**
 
