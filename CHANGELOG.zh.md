@@ -26,6 +26,10 @@
 - 统一日志体系（`PluginLogger`），支持前缀分级。
 - 新增 Markdown 表格分块和文本清理单元测试。
 
+### 修复
+
+- **审批按钮点击无效导致请求超时**：迁移至 framework 的 v2 按钮协议（`approve:v2:<kind>:<encodedId>:<decision>`），并接入 `ChannelApprovalCapability` 契约。修复"允许一次 / 始终允许 / 拒绝"按钮被 framework v2 解析器吞掉、审批请求最终超时的问题。最低 openclaw 版本要求提升至内置 `approval-delivery-runtime` 的版本；不再保留旧版 framework 的动态 import fallback。
+
 ---
 
 ## [1.7.2] - 2026-06-05
