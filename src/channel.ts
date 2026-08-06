@@ -36,6 +36,7 @@ import { startAccountWithCredentialRecovery, logoutAndClearCredentials, stopAcco
 import { loadCredentialBackup } from './features/credential-backup.js';
 import { isApprovalPayload, approvalStubs } from './features/approval-utils.js';
 import { qqbotOnboardingAdapter } from './features/onboarding.js';
+import { getQQBotApprovalCapability } from './features/approval/capability.js';
 import { stripMentionText } from './utils/mention.js';
 
 /** QQ Bot 单条消息文本长度上限 */
@@ -316,6 +317,9 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
       lastOutboundAt: runtime?.lastOutboundAt ?? null,
     }),
   },
+
+  // ── 审批能力（v2 — 由 features/approval/capability 提供）──
+  approvalCapability: getQQBotApprovalCapability(),
 
   // ── 审批（stub — 实际由 features/approval-handler 处理）──
   ...approvalStubs,
