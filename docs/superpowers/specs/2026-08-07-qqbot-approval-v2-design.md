@@ -110,12 +110,19 @@ We remove the plugin's hand-rolled `QQBotApprovalHandler`, `handleApproval`,
 Pure functions, no framework imports beyond types. Lives under `engine/` to
 match the layout used by `/root/openclaw/extensions/qqbot/src/engine/approval/`.
 
+The unified `PendingApprovalView` from
+`openclaw/plugin-sdk/approval-handler-runtime` carries an `approvalKind`
+field plus typed exec/plugin payloads. We dispatch on `approvalKind`
+inside the same function rather than splitting into separate `buildExec…`
+and `buildPlugin…` variants.
+
 Exports:
 
-- `buildExecApprovalText(view, nowMs)` — receives
-  `ExecApprovalPendingView` from the framework (`approval-handler-runtime`),
-  not the legacy `ExecApprovalRequest`.
-- `buildPluginApprovalText(view, nowMs)` — same for plugin approvals.
+- `buildExecApprovalText(view: PendingApprovalView, nowMs)` — dispatches on
+  `view.approvalKind === 'exec'`. The `view` is the framework's unified
+  `PendingApprovalView` (not the legacy `ExecApprovalRequest`).
+- `buildPluginApprovalText(view: PendingApprovalView, nowMs)` — same shape
+  for plugin approvals.
 - `buildApprovalKeyboard(approvalId, approvalKind, allowedDecisions)` —
   builds `InlineKeyboard` with three buttons:
   - data shape `approve:v2:${approvalKind}:${encodeURIComponent(approvalId)}:${decision}`
@@ -125,7 +132,8 @@ Exports:
   returns `{ type: ChatScope, id: string } | null`.
 - `parseApprovalButtonData(buttonData)` — uses the regex
   `^approve:v2:(exec|plugin):([^:]+):(allow-once|allow-always|deny)$`,
-  returns `null` on mismatch.
+  returns `null` on mismatch. (Used by the framework, not by us directly;
+  we keep an exported copy for unit tests.)
 
 ### B. `src/bridge/approval/capability.ts`
 
@@ -152,25 +160,30 @@ Hooks:
 Implements `ChannelApprovalNativeRuntimeSpec`. Lazy-loaded by `capability.ts`
 so heavy imports (messaging sender) stay off the critical startup path.
 
-Sections:
+Sections (matches the runtime adapter interface in
+`approval-handler-runtime-types-D67cLD0j.d.ts`):
 
-- `availability` — same predicates as `capability.ts`, factored out for the
-  spec interface.
+- `availability` — `isConfigured` / `shouldHandle`, same predicates as
+  `capability.ts`, factored out for the spec interface.
 - `presentation`:
-  - `buildPendingPayload({ view, nowMs })` — calls
-    `buildExecApprovalText` or `buildPluginApprovalText` + `buildApprovalKeyboard`
-    (with `allowedDecisions` from `view.actions.map(action => action.decision)`).
+  - `buildPendingPayload({ view, nowMs })` — dispatches on
+    `view.approvalKind` (`exec` → `buildExecApprovalText`,
+    `plugin` → `buildPluginApprovalText`), then `buildApprovalKeyboard`
+    with `allowedDecisions` from `view.actions.map(action => action.decision)`.
   - `buildResolvedResult` → `{ kind: "leave" }`. Framework handles the
-    visited-label state on the original card automatically.
+    visited-label state on the original card automatically; no message
+    update needed.
   - `buildExpiredResult` → `{ kind: "leave" }`.
 - `transport`:
-  - `prepareTarget({ request })` → `resolveApprovalTarget`, returns
-    `{ target, dedupeKey: \`${type}:${id}\` }`.
-  - `deliverPending({ cfg, accountId, preparedTarget, pendingPayload })` →
-    resolves account + creds, calls `messageApi.sendMessage(type, id, text, creds, { inlineKeyboard })`.
-- `resolve({ view, preparedTarget })` — sends a short text ack to the user
-  ("✅ 已记录：${decision}") via `messageApi.sendMessage` (no keyboard). The
-  framework handles the RPC side; this ack is purely UX.
+  - `prepareTarget({ plannedTarget, view, ... })` → `resolveApprovalTarget`,
+    returns `{ target, dedupeKey: \`${type}:${id}\` }`.
+  - `deliverPending({ preparedTarget, pendingPayload, ... })` → resolves
+    account + creds, calls `messageApi.sendMessage(type, id, text, creds, { inlineKeyboard })`.
+- `observe.onDelivered` — no-op stub (we may later add a debug log here).
+- `interactions` — not implemented. The reference implementation in
+  `/root/openclaw/extensions/qqbot/src/bridge/approval/handler-runtime.ts`
+  also does not implement this section; framework handles binding
+  automatically based on button data.
 
 ### D. `src/channel.ts`
 
@@ -210,10 +223,13 @@ require removal.
 
 1. QQ Bot platform pushes INTERACTION_CREATE to the framework gateway.
 2. Framework runs `parseApprovalButtonData` (the v2 regex).
-3. Framework calls `nativeRuntime.adapter.resolve({ view, preparedTarget })`.
-4. Plugin sends a short ack to the original target (no keyboard).
-5. Framework separately calls `gateway.request('exec.approval.resolve', { id, decision })`.
-6. Framework receives the ACK and updates the card to `visited_label`.
+3. Framework calls `gateway.request('exec.approval.resolve', { id, decision })`
+   (and marks the entry as resolved).
+4. Framework invokes `presentation.buildResolvedResult` on us. We return
+   `{ kind: "leave" }`; framework keeps the original message with QQ Bot's
+   automatic `visited_label` rendering.
+5. **No plugin-side click hook is invoked.** The plugin never sees the
+   individual click decision in this contract.
 
 ### Expire
 
@@ -295,6 +311,31 @@ Removed test files:
 
 ## Open Questions
 
-None at draft time. The user has signed off on:
-- Migration to the new SDK contract (vs. minimum patch).
-- "RPC + short ack" UX on click (vs. silent resolve).
+1. **"RPC + 短回复" UX is not natively supported.** The v2 runtime spec
+   exposes no click-side hook (`approval-handler-runtime-types-D67cLD0j.d.ts`).
+   `interactions.bindPending` runs on card delivery, not on click; the
+   reference implementation in
+   `/root/openclaw/extensions/qqbot/src/bridge/approval/handler-runtime.ts`
+   also omits a short ack. Click-side UX options:
+   - **A.** Drop the short ack. Click → card auto-switches to `visited_label`
+     (✅ 已处理 / ❌ 已拒绝). Matches the reference implementation.
+     Simplest.
+   - **B.** Send a short ack from `onDelivered` (delivery, not click). This
+     produces a "card + ack" pair on every approval, not just on click. Adds
+     noise for every request even when the user never interacts.
+   - **C.** Keep the legacy `onInteraction` listener in addition to the
+     capability, and send the short ack from the legacy path. This means
+     we own the INTERACTION routing and bypass the framework's resolver,
+     which fights the migration goal.
+   The user picked "RPC + 短回复" before we discovered this constraint.
+   We flag the trade-off and recommend **A** for this PR, with a separate
+   follow-up to investigate a future SDK extension if QQ users complain.
+
+2. **Should we keep a fallback path for older openclaw releases?**
+   The current `loadApprovalGatewayRuntime()` dynamic import lets the
+   plugin run on openclaw < 3.22 (which lacks approval-runtime). The new
+   `approval-delivery-runtime` exists in current builds but not in ancient
+   ones. If we want to keep the dynamic-import fallback, we need a feature
+   detection around `plugin-sdk/approval-delivery-runtime`. Recommendation:
+   drop the fallback in this PR — the legacy version is unsupported per
+   the openclaw release notes — and bump the documented minimum version.
