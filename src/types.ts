@@ -30,8 +30,10 @@ export interface ResolvedQQBotAccount {
   /** User-Agent 尾部追加内容 */
   userAgentSuffix: string;
   /**
-   * 单条消息最大处理时间（ms）。超时后 concurrencyGuard 会 abort 处理链，
-   * 释放锁并排空缓冲消息。0 表示不限制。默认 0（不限制）。
+   * 单条消息最大处理时间（ms）。0 表示不限制。默认 0（不限制）。
+   * 
+   * 注意：此配置目前已不再使用，因为已移除插件级的 concurrencyGuard 中间件，
+   * 并发控制由 OpenClaw 框架的 session lane 机制处理。
    */
   processingTimeoutMs: number;
   config: QQBotAccountConfig;
@@ -172,8 +174,9 @@ export interface QQBotAccountConfig {
   stt?: STTChannelConfig;
   /**
    * 单条消息最大处理时间（毫秒）。
-   * 超时后 concurrencyGuard 会 abort 处理链（取消 LLM 调用、工具执行等），
-   * 释放并发锁并排空缓冲消息。
+   *
+   * 注意：此配置目前已不再使用，因为已移除插件级的 concurrencyGuard 中间件，
+   * 并发控制由 OpenClaw 框架的 session lane 机制处理。
    *
    * 设为 0 表示不限制超时。默认 0（不限制）。
    *

@@ -35,6 +35,8 @@ export async function handleMessage(
     : `qqbot:c2c:${msg.replyTarget.targetId}`;
 
   const mergedCount = (ctx.state.mergedMessages as unknown[] | undefined)?.length;
+  // 注意：mergedCount 目前始终为 undefined，因为已移除 concurrencyGuard 中间件
+  // 保留此日志以便未来调试或恢复消息合并功能
   if (mergedCount) {
     hlog.info(`merged batch count=${mergedCount} msgId=${msg.messageId}`);
   } else {
