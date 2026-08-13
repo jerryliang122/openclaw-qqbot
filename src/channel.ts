@@ -34,7 +34,8 @@ import { normalizeTarget, isQQBotTarget } from './outbound/target.js';
 import { sanitizeQQBotText } from './outbound/sanitize.js';
 import { startAccountWithCredentialRecovery, logoutAndClearCredentials, stopAccountGracefully } from './gateway/lifecycle.js';
 import { loadCredentialBackup } from './features/credential-backup.js';
-import { isApprovalPayload, approvalStubs } from './features/approval-utils.js';
+import { isApprovalPayload } from './features/approval-utils.js';
+import { getQQBotApprovalCapability } from './features/approval-capability.js';
 import { qqbotOnboardingAdapter } from './features/onboarding.js';
 import { stripMentionText } from './utils/mention.js';
 
@@ -278,10 +279,10 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
   // ── 登录认证 ──
   auth: {
     login: qqbotLogin as any,
-    // 审批权限（从 approvalStubs 迁移）
-    authorizeActorAction: () => ({ authorized: true } as const),
-    getActionAvailabilityState: () => ({ kind: 'enabled' as const } as const),
   },
+
+  // ── 审批（由框架从 approvalCapability + "approval.native" runtime context 自动引导）──
+  approvalCapability: getQQBotApprovalCapability(),
 
   // ── 状态 ──
   status: {
@@ -316,9 +317,6 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
       lastOutboundAt: runtime?.lastOutboundAt ?? null,
     }),
   },
-
-  // ── 审批（stub — 实际由 features/approval-handler 处理）──
-  ...approvalStubs,
 };
 
 function resolveMCPAgentId(to: string, accountId: string, cfg: unknown, log?: PluginLogger): string | undefined {

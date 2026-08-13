@@ -732,19 +732,6 @@ declare module "openclaw/plugin-sdk/setup-tools" {
   export function formatDocsLink(href: string, text?: string): string;
 }
 
-declare module "openclaw/plugin-sdk/approval-runtime" {
-  export interface ExecApprovalReplyMetadata {
-    approvalId: string;
-    approvalSlug: string;
-    allowedDecisions?: string[];
-  }
-  export type ExecApprovalRequest = import("openclaw/plugin-sdk").ExecApprovalRequest;
-  export type ExecApprovalResolved = import("openclaw/plugin-sdk").ExecApprovalResolved;
-  export type PluginApprovalRequest = import("openclaw/plugin-sdk").PluginApprovalRequest;
-  export type PluginApprovalResolved = import("openclaw/plugin-sdk").PluginApprovalResolved;
-  export function getExecApprovalReplyMetadata(payload: { channelData?: unknown }): ExecApprovalReplyMetadata | null;
-}
-
 declare module "openclaw/plugin-sdk/core" {
   export type OpenClawConfig = import("openclaw/plugin-sdk").OpenClawConfig;
   export type ChannelPlugin<TAccount = unknown> =
@@ -759,27 +746,4 @@ declare module "openclaw/plugin-sdk/core" {
 
   // 允许其它 core 导出被逐步补齐（避免引入大量严格类型时频繁改代码）
   export * from "openclaw/plugin-sdk";
-}
-
-declare module "openclaw/plugin-sdk/gateway-runtime" {
-  export interface EventFrame {
-    event: string;
-    payload: unknown;
-  }
-
-  export interface GatewayClient {
-    start: () => void | Promise<void>;
-    stop: () => void | Promise<void>;
-    request: (method: string, params: unknown) => Promise<unknown>;
-  }
-
-  export function createOperatorApprovalsGatewayClient(options: {
-    config: import("openclaw/plugin-sdk").OpenClawConfig;
-    gatewayUrl?: string;
-    clientDisplayName?: string;
-    onEvent: (evt: EventFrame) => void;
-    onHelloOk?: () => void;
-    onConnectError?: (err: { message: string }) => void;
-    onClose?: (code: number, reason: string) => void;
-  }): Promise<GatewayClient>;
 }

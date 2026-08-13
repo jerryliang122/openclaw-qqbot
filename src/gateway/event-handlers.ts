@@ -12,7 +12,8 @@ import type { ResolvedQQBotAccount } from '../types.js';
 import type { PluginLogger } from '../utils/plugin-logger.js';
 import { dispatchToOpenClaw } from '../dispatch/index.js';
 import { runWithRequestContext } from '../request-context.js';
-import { getApprovalHandler } from '../features/approval-handler.js';
+import { authorizeQQBotApprovalAction } from '../features/approval-capability.js';
+import { parseApprovalButtonData } from '../features/approval-helpers.js';
 import { recordKnownUser } from '../features/proactive.js';
 import { cacheMsgId } from '../features/msgid-cache.js';
 import { getAdapters } from '../adapter/resolve.js';
@@ -96,7 +97,7 @@ export async function handleInteraction(
     return;
   }
 
-  await handleApproval(event, account, log, acknowledgeInteraction);
+  await handleApproval(event, account, runtime, log, acknowledgeInteraction);
 }
 
 // ── Interaction 子处理 ──
@@ -150,6 +151,7 @@ async function handleConfigUpdate(
 async function handleApproval(
   event: InteractionEvent,
   account: ResolvedQQBotAccount,
+  runtime: PluginRuntime,
   log: PluginLogger,
   ack: (id: string) => Promise<void>,
 ): Promise<void> {
@@ -158,22 +160,36 @@ async function handleApproval(
   const buttonData = event.data?.resolved?.button_data;
   if (!buttonData?.startsWith('approve:')) return;
 
+  const parsed = parseApprovalButtonData(buttonData);
+  if (!parsed) return;
+
+  // Live config snapshot so allowFrom changes apply without a restart.
+  // getConfig returns `any` — keep it untyped here to avoid crossing the
+  // project's hand-written ambient SDK types with the real SDK types.
+  const cfg = getAdapters(runtime).getConfig?.() ?? {};
+
   // 身份授权校验：操作者需在 allowFrom 白名单中
   const operatorId = resolveOperatorId(event);
-  if (!isApprovalAuthorized(account, operatorId)) {
-    log.warn(`[approval] unauthorized operator=${operatorId ?? 'unknown'} account=${account.accountId}`);
+  const authorization = authorizeQQBotApprovalAction({
+    cfg,
+    accountId: account.accountId,
+    senderId: operatorId,
+  });
+  if (!authorization.authorized) {
+    log.warn(`[approval] unauthorized operator=${operatorId ?? 'unknown'} account=${account.accountId}${authorization.reason ? ` reason=${authorization.reason}` : ''}`);
     return;
   }
 
-  const parts = buttonData.split(':');
-  if (parts.length < 3) return;
-
-  const handler = getApprovalHandler(account.accountId);
-  if (!handler) return;
-
-  const approvalId = parts[1];
-  const decision = parts[2] as 'allow-once' | 'allow-always' | 'deny';
-  try { await handler.resolveApproval(approvalId, decision); } catch (err) {
+  try {
+    const { resolveApprovalOverGateway } = await import('openclaw/plugin-sdk/approval-gateway-runtime');
+    await resolveApprovalOverGateway({
+      cfg,
+      approvalId: parsed.approvalId,
+      decision: parsed.decision,
+      senderId: operatorId,
+      clientDisplayName: 'QQBot Approval Handler',
+    });
+  } catch (err) {
     log.error(`interaction approve error: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
@@ -192,17 +208,6 @@ function resolveOperatorId(event: InteractionEvent): string | undefined {
     ?? evt.data?.resolved?.user_id
     ?? evt.data?.resolved?.user_openid
     ?? evt.openid;
-}
-
-/**
- * 校验操作者是否有权限执行审批操作。
- * 规则：allowFrom 为空或含 "*" → 开放；否则操作者必须在 allowFrom 中。
- */
-function isApprovalAuthorized(account: ResolvedQQBotAccount, operatorId?: string): boolean {
-  if (!operatorId) return false;
-  const allowFrom = account.config?.allowFrom ?? [];
-  if (!allowFrom.length || allowFrom.includes('*')) return true;
-  return allowFrom.includes(operatorId);
 }
 
 function buildClawCfg(

@@ -4,7 +4,7 @@
  * 封装 startAccount / logoutAccount 的业务逻辑：
  * - 凭证恢复
  * - QQBotGateway 实例创建与注册
- * - Features 初始化（update-checker、approval-handler）
+ * - 注册 "approval.native" 运行时上下文（框架据此自动引导 native 审批 handler）
  * - 登出时凭证清除
  */
 import type { OpenClawConfig } from 'openclaw/plugin-sdk/core';
@@ -18,7 +18,7 @@ import type { PluginLogger } from '../utils/plugin-logger.js';
 import { registerGateway, unregisterGateway, getGateway } from '../outbound/outbound-service.js';
 import { saveCredentialBackup, loadCredentialBackup } from '../features/credential-backup.js';
 import { triggerUpdateCheck } from '../features/update-checker.js';
-import { QQBotApprovalHandler, registerApprovalHandler, unregisterApprovalHandler, getApprovalHandler } from '../features/approval-handler.js';
+import { CHANNEL_APPROVAL_NATIVE_RUNTIME_CONTEXT_CAPABILITY } from '../features/approval-capability.js';
 
 export interface StartAccountContext {
   account: ResolvedQQBotAccount;
@@ -83,7 +83,7 @@ export async function startAccountWithCredentialRecovery(ctx: StartAccountContex
             });
 
         // ── Features 初始化（gateway ready 后触发）──
-        initFeatures(account, cfg, log).catch((e) => {
+        initFeatures(account, ctx, log).catch((e) => {
           log?.error(`[qqbot:${account.accountId}] initFeatures error: ${e}`);
             });
       },
@@ -99,29 +99,41 @@ export async function startAccountWithCredentialRecovery(ctx: StartAccountContex
 /**
  * Gateway ready 后初始化各 feature 模块
  */
-async function initFeatures(account: ResolvedQQBotAccount, cfg: any, log: PluginLogger): Promise<void> {
+async function initFeatures(
+  account: ResolvedQQBotAccount,
+  ctx: StartAccountContext,
+  log: PluginLogger,
+): Promise<void> {
   // 1. 版本更新检测（后台预热，fire-and-forget）
   triggerUpdateCheck(log);
 
-  const existing = getApprovalHandler(account.accountId);
-  if (existing) {
-    await existing.stop();
-    unregisterApprovalHandler(account.accountId);
+  // 2. 注册 "approval.native" 运行时上下文。框架的 approval bootstrap 监听此上下文，
+  //    据此为该账户自动 spawn native 审批 handler（消费 exec/plugin approval 事件，
+  //    回调 qqbotPlugin.approvalCapability.nativeRuntime 的 availability/presentation/transport）。
+  //    账户停止时 abortSignal 触发，上下文自动注销。
+  registerApprovalNativeContext(account.accountId, ctx);
+}
+
+/**
+ * 注册 qqbot 的 native approval 运行时上下文（若框架已提供 channelRuntime）。
+ */
+function registerApprovalNativeContext(accountId: string, ctx: StartAccountContext): void {
+  const channelRuntime = (ctx as { channelRuntime?: { runtimeContexts?: any } }).channelRuntime;
+  const registry = channelRuntime?.runtimeContexts;
+  if (!registry || typeof registry.register !== 'function') {
+    // 框架版本不支持运行时上下文注册 → native 审批降级为不可用（不影响消息收发）。
+    return;
   }
-  const approvalLog = log.child('approval');
   try {
-    const handler = new QQBotApprovalHandler({
-      accountId: account.accountId,
-      appId: account.appId,
-      clientSecret: account.clientSecret,
-      cfg,
-      log: approvalLog,
+    registry.register({
+      channelId: 'qqbot',
+      accountId,
+      capability: CHANNEL_APPROVAL_NATIVE_RUNTIME_CONTEXT_CAPABILITY,
+      context: { accountId },
+      abortSignal: ctx.abortSignal,
     });
-    registerApprovalHandler(account.accountId, handler);
-    await handler.start();
-    approvalLog.info('registered');
-  } catch (e) {
-    approvalLog.debug(`not available: ${e}`);
+  } catch {
+    // 重复注册或 registry 异常时静默 — 框架会按 accountId 去重。
   }
 }
 
@@ -133,7 +145,7 @@ async function initFeatures(account: ResolvedQQBotAccount, cfg: any, log: Plugin
  *
  * 实现策略：
  *   1. 主动调用 bot.stop() — 比 abort 信号更立刻、不依赖事件循环时机
- *   2. 注销 approval handler / gateway
+ *   2. 注销 gateway（native 审批上下文由 abortSignal 自动注销，无需手动清理）
  *   3. 立即返回；剩余资源（typing keepalive 定时器等）由 abort 信号触发收尾
  */
 export async function stopAccountGracefully(params: {
@@ -154,12 +166,6 @@ export async function stopAccountGracefully(params: {
   }
 
   unregisterGateway(accountId);
-  try {
-    const h = getApprovalHandler(accountId);
-    if (h) await h.stop();
-  } catch {
-  }
-  unregisterApprovalHandler(accountId);
 }
 
 /**
@@ -171,12 +177,6 @@ export async function logoutAndClearCredentials(params: {
 }): Promise<{ ok: boolean; cleared: boolean; envToken: boolean; loggedOut: boolean }> {
   const { accountId, cfg } = params;
   unregisterGateway(accountId);
-  try {
-    const h = getApprovalHandler(accountId);
-    if (h) await h.stop();
-  } catch {
-  }
-  unregisterApprovalHandler(accountId);
 
   const nextCfg = { ...cfg } as OpenClawConfig;
   const nextQQBot = cfg.channels?.qqbot ? { ...cfg.channels.qqbot } : undefined;
