@@ -2,15 +2,19 @@
  * SDK 中间件编排
  *
  * 根据账户配置组装 SDK 内置中间件链。
- * 中间件负责过滤和上下文富化；concurrencyGuard 负责串行+合并，
- * 合并后的消息继续走完剩余中间件链，最终统一由 bot.on("message") 处理转发。
+ * 中间件负责过滤和上下文富化。
+ * 
+ * 并发控制说明：
+ * - 已移除插件级的 concurrencyGuard 中间件
+ * - 依赖 OpenClaw 框架的 session lane 机制实现并发控制
+ * - 框架会自动按 sessionKey（qqbot:accountId:openid）串行处理同一会话的消息
+ * - 这样与 Telegram 等其他 channel 保持一致，避免双重串行
  */
 import type { QQBot, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import {
   messageFilter,
   contentSanitizer,
   rateLimiter,
-  concurrencyGuard,
   mentionGate,
   quoteRef,
   historyBuffer,
@@ -77,58 +81,23 @@ export function setupMiddlewares(bot: QQBot, account: ResolvedQQBotAccount, opts
   // 8. 三层限流（sender / group / global）
   bot.use(rateLimiter());
 
-  // 9. 斜杠命令（在并发锁之前，命令匹配后直接 reply + stop，不排队）
+  // 9. 斜杠命令（命令匹配后直接 reply + stop）
   //    依赖：ctx.state.policy（policyInjector, #3）、ctx.message.*（原始消息）
-  //    注意：/stop 是框架级命令，不在 qqbot 命令列表中，仍由 urgentPredicate 处理
   const slash = slashCommand({ commands: buildCommandList(account, { getRuntime: opts.getRuntime }) });
   bot.use(slash.middleware);
 
-  // 10. 并发串行+合并（在副作用中间件之前）
-  //     - 同 peer 串行处理，避免平台 session conflict
-  //     - 处理中消息暂存 buffer；完成后合并为一条，继续走完剩余中间件链
-  //       （typingIndicator/quoteRef/attachmentProcessor/... 直到 bot.on("message")）
-  //     - 合并时清除 assembledBody 让 dispatch.ts 用合并后 content 重建
-  //     - 超时后 abort 处理链（取消 LLM 调用），释放锁并排空缓冲
-  bot.use(concurrencyGuard({
-    strategy: 'merge',
-    maxQueue: 50,
-    maxProcessingMs: account.processingTimeoutMs,
-    /** 紧急指令（/stop）跳过排队，立即处理 */
-    urgentPredicate: (ctx: MiddlewareContext) => {
-      return (ctx.message.content as string ?? '').trim() === '/stop';
-    },
-    onMerge: (buffered) => {
-      const last = buffered[buffered.length - 1];
-      if (buffered.length === 1) return last;
-
-      // 透传原始消息列表，格式拼接下沉给下游 envelopeFormatter / assembleBody
-      (last.state as Record<string, unknown>).mergedMessages = buffered;
-
-      // 合并附件（所有 buffer 中的附件汇总到 survivor）
-      const attachments = buffered.flatMap((c) => c.message.attachments ?? []);
-      if (attachments.length > 0) {
-        last.message.attachments = attachments;
-      }
-
-      // 清除 assembledBody，让 dispatch.ts 用合并后的 ctx 重新构建
-      delete (last.state as Record<string, unknown>).assembledBody;
-
-      return last;
-    },
-  }));
-
-  // 11. C2C 输入状态指示器
+  // 10. C2C 输入状态指示器
   bot.use(typingIndicator());
 
-  // 12. 引用消息解析（默认优先 msg_elements 获取文件名等丰富信息）
+  // 11. 引用消息解析（默认优先 msg_elements 获取文件名等丰富信息）
   bot.use(quoteRef({
     store: getPersistedRefIndexStore(account.accountId),
   }));
 
-  // 13. 附件处理（语音 STT 转录 + 图片/文件下载）
+  // 12. 附件处理（语音 STT 转录 + 图片/文件下载）
   bot.use(attachmentProcessor({ getRuntime: opts.getRuntime }));
 
-  // 14. 上下文组装（构建框架规约的 body）
+  // 13. 上下文组装（构建框架规约的 body）
   bot.use(envelopeFormatter({
     format: (ctx) => {
       const assembled = assembleBody(ctx, ctx.message as never, account, opts.getRuntime);

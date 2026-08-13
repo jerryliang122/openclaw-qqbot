@@ -100,9 +100,9 @@ export class QQBotGateway {
     // 包装 sendText/sendMedia，回复后自动写入 ref-index store
     this.wrapBotSendForRefIndex();
 
-    // concurrencyGuard 的 merge 策略合并后会继续走完剩余中间件链，
-    // 最终与单条消息一样统一由下方 bot.on('message') 处理转发，
-    // 因此这里不再需要单独的 onMergeDispatch 回调。
+    // concurrencyGuard 已移除，消息不再在此处合并
+    // 所有消息都直接走完中间件链，由 bot.on('message') 处理转发
+    // 并发控制由 OpenClaw 框架的 session lane 机制处理
     setupMiddlewares(this.bot, account, {
       getRuntime: () => runtime,
     });

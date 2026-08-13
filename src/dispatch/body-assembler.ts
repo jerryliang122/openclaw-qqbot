@@ -144,7 +144,11 @@ function buildUserMessage(input: {
   return `${quotePart}${userContent}`;
 }
 
-/** Layer 3（合并版）：concurrencyGuard merge 透传的多条消息 */
+/** Layer 3（合并版）：消息合并处理（已废弃）
+ * 
+ * 注意：此函数目前不会被触发，因为已移除 concurrencyGuard 中间件。
+ * 保留代码仅供参考，未来如需消息合并功能应考虑在框架层面实现。
+ */
 function buildMergedUserMessage(input: {
   messages: MiddlewareContext[];
   quotePart: string;
