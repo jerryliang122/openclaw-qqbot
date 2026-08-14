@@ -243,10 +243,12 @@ export class QQBotGateway {
     const storeEntry = (msg: MessageResponse, content: string, scope: string, mediaKind?: string): void => {
       const refIdx = msg.ext_info?.ref_idx;
       if (!refIdx) return;
-      // 空内容降级为媒体类型标签
+      // 空内容降级为媒体类型标签（统一中文格式）
       const finalContent = content || mediaKind
         ? mediaKind === 'voice' ? '[语音]'
         : mediaKind === 'image' ? '[图片]'
+        : mediaKind === 'video' ? '[视频]'
+        : mediaKind === 'file' ? '[文件]'
         : mediaKind ? `[${mediaKind}]`
         : content
         : '';
