@@ -243,15 +243,16 @@ export class QQBotGateway {
     const storeEntry = (msg: MessageResponse, content: string, scope: string, mediaKind?: string): void => {
       const refIdx = msg.ext_info?.ref_idx;
       if (!refIdx) return;
-      // 空内容降级为媒体类型标签（统一中文格式）
-      const finalContent = content || mediaKind
-        ? mediaKind === 'voice' ? '[语音]'
-        : mediaKind === 'image' ? '[图片]'
-        : mediaKind === 'video' ? '[视频]'
-        : mediaKind === 'file' ? '[文件]'
-        : mediaKind ? `[${mediaKind}]`
-        : content
-        : '';
+      
+      // 修复运算符优先级问题：当 content 非空时直接使用，否则回退到媒体标签
+      let finalContent = content;
+      if (!content && mediaKind) {
+        finalContent = mediaKind === 'voice' ? '[语音]'
+          : mediaKind === 'image' ? '[图片]'
+          : mediaKind === 'video' ? '[视频]'
+          : mediaKind === 'file' ? '[文件]'
+          : `[${mediaKind}]`;
+      }
       const entry = {
         messageId: msg.id, content: finalContent, senderId: appId, senderName,
         timestamp: typeof msg.timestamp === 'number' ? new Date(msg.timestamp).toISOString() : msg.timestamp,
