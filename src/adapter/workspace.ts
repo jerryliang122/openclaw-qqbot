@@ -7,7 +7,8 @@
 import { createRequire } from 'node:module';
 import { getQQBotMediaDir } from '../utils/platform.js';
 
-const req = createRequire(__filename);
+// import.meta.url：ESM（tsx 测试直导）与 tsup CJS 输出（esbuild shim）均可用
+const req = createRequire(import.meta.url);
 
 let health: {
   resolveAgentWorkspaceDir: (cfg: any, agentId: string) => string;

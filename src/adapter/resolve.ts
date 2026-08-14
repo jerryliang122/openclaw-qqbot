@@ -150,6 +150,7 @@ export function resolveRuntimeAdapters(
             SessionKey: params.route.routeSessionKey,
             AccountId: params.route.accountId ?? params.accountId,
             ChatType: params.conversation.kind,
+            ChatId: params.conversation.id,
             GroupSystemPrompt: params.conversation.label,
             SenderId: params.sender.id,
             SenderName: params.sender.name,

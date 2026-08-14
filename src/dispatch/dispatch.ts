@@ -25,6 +25,24 @@ import { StreamingController, shouldUseStreaming } from '../outbound/streaming-c
 import { getAdapters } from '../adapter/resolve.js';
 import { clearGroupHistory } from '../features/history-store.js';
 
+/** 失败兜底文案（对齐 telegram：Something went wrong while processing your request.） */
+const FAILURE_FALLBACK_TEXT = 'Something went wrong while processing your request. Please try again.';
+
+/**
+ * 合并 AbortSignal（Node >= 20.3 使用 AbortSignal.any，低版本退回首个 signal）。
+ * turnAdoptionLifecycle 的 pre-adoption abort 需要与请求级 signal 共同生效。
+ */
+function combineAbortSignals(
+  requestSignal: AbortSignal | undefined,
+  turnSignal: AbortSignal,
+): AbortSignal {
+  const any = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+  if (typeof any === 'function') {
+    return any.call(AbortSignal, requestSignal ? [requestSignal, turnSignal] : [turnSignal]);
+  }
+  return requestSignal ?? turnSignal;
+}
+
 
 /**
  * 将经过中间件处理的入站消息转发给 OpenClaw AI
@@ -77,9 +95,10 @@ export async function dispatchToOpenClaw(
 
   const debounceConfig = account.config?.deliverDebounce;
   const debouncer = debounceConfig?.enabled !== false
-    ? new DeliverDebouncer(debounceConfig, (targetId, mergedText) =>
-        sendText({ to: targetId, text: mergedText, accountId: account.accountId, replyToId: envelope.messageId, account }).then(() => {}),
-      )
+    ? new DeliverDebouncer(debounceConfig, async (targetId, mergedText) => {
+        const result = await sendText({ to: targetId, text: mergedText, accountId: account.accountId, replyToId: envelope.messageId, account });
+        trackOutbound(result, 'debounce');
+      })
     : undefined;
 
   const deliverCtx: DeliverContext = {
@@ -89,7 +108,8 @@ export async function dispatchToOpenClaw(
     chatScope: envelope.chatScope === 'group' ? 'group' : 'direct',
     cfg,
     debouncer: debouncer?.enabled ? debouncer : undefined,
-    sendText: (to, text) => sendText({ to, text, accountId: account.accountId, replyToId: envelope.messageId, account }),
+    sendText: (to, text) => sendText({ to, text, accountId: account.accountId, replyToId: envelope.messageId, account })
+      .then((result) => trackOutbound(result, 'deliverCtx.sendText')),
     sendMedia: (to, source, opts) => sendMedia({
       to,
       source,
@@ -98,7 +118,7 @@ export async function dispatchToOpenClaw(
       accountId: account.accountId,
       agentId: route.agentId,
       log: deliverCtx.log,
-    }),
+    }).then((result) => trackOutbound(result, 'deliverCtx.sendMedia')),
     textToSpeech: ttsRuntime?.textToSpeech
       ? (params) => ttsRuntime.textToSpeech(params)
       : undefined,
@@ -124,247 +144,246 @@ export async function dispatchToOpenClaw(
 
   const deliveredMediaUrls = new Set<string>();
   const deliveredTexts = new Set<string>();
-
-  if (!adapters.inboundRun) {
-    // 低版本：手动 session + dispatchReply 直调
-    if (adapters.recordInboundSession) {
-      try {
-        await adapters.recordInboundSession({
-          storePath,
-          sessionKey: route.sessionKey,
-          ctx: ctxPayload,
-        });
-      } catch { /* best-effort */ }
+  let deliverErrorCount = 0;
+  // 出站发送成功/失败计数：deliver-pipeline 对 sendText {error} 只记日志不抛错，
+  // 这里在 dispatch 拥有的发送闭包边界上统计，作为"用户是否收到可见回复"的判据。
+  let outboundSendOk = 0;
+  let outboundSendFail = 0;
+  const trackOutbound = <T extends { error?: string }>(result: T, via: string): T => {
+    if (result.error) {
+      outboundSendFail++;
+      dlog?.error(`outbound send failed via ${via}: ${String(result.error)}`);
+    } else {
+      outboundSendOk++;
     }
-    await adapters.dispatchReply!({
-      ctx: ctxPayload,
-      cfg,
-      dispatcherOptions: {
-        deliver: async (payload: DeliverPayload, info?: DeliverInfo) => {
-          try {
-            // 与 inboundRun 分支保持一致的 kind 分支结构。
-            // 低版本 SDK 同样支持 deliver info.kind（dispatchReplyWithBufferedBlockDispatcher）。
-            const kind = (info as any)?.kind as string | undefined;
-            const text = payload.text?.trim() ?? '';
-            const hasMedia = !!(payload.mediaUrl || payload.mediaUrls?.length);
-            dlog?.debug(`deliver kind=${kind ?? 'none'} textLen=${text.length} voice=${!!payload.audioAsVoice} media=${hasMedia}`);
+    return result;
+  };
 
-            // ── 1. block: 媒体/语音立即发送，文本留给流式 ──
-            // 注：static 模式已显式 disableBlockStreaming:true，kind:'block' 不会再触发；
-            // 此分支保留以兼容 stream 模式与未来变化。
-            if (kind === 'block') {
-              if (payload.audioAsVoice) {
-                await deliverReply(payload, info, deliverCtx);
-              } else {
-                await forwardMediaUrls(payload, deliverCtx, deliveredMediaUrls, dlog);
-              }
-            }
+  /**
+   * deliver 回调（两个分支共用）。
+   *
+   * 失败语义（对齐 telegram）：捕获后计数并记录日志，不中断后续 payload；
+   * dispatch 结束后若 (deliver 失败 || dispatch 抛错) 且用户未收到任何可见回复，
+   * 发送兜底消息，避免静默失败。
+   */
+  const deliverHandler = async (payload: DeliverPayload, info?: DeliverInfo): Promise<void> => {
+    try {
+      const kind = (info as any)?.kind as string | undefined;
+      const text = payload.text?.trim() ?? '';
+      const hasMedia = !!(payload.mediaUrl || payload.mediaUrls?.length);
+      dlog?.debug(`deliver kind=${kind ?? 'none'} textLen=${text.length} voice=${!!payload.audioAsVoice} media=${hasMedia}`);
 
-            // ── 2. 流式路径：流式已启动且未降级 -> 跳过静态发送 ──
-            if (streamingController?.hasStarted && !streamingController?.shouldFallbackToStatic) {
-              if (streamingController.isStaticSendMode) {
-                // static 模式：flush 主路径由 onToolStart 驱动（工具开始前，绕开 SDK
-                // block streaming 的 coalescer，避免 minChars=800/idleMs=1000 buffer 延迟）。
-                // 这里仅兜底：deliver(kind:'tool') 时再 flush 一次（controller 内部去重，
-                // buffer 已空时 flushSegment 无副作用）。
-                if (kind === 'tool') {
-                  await streamingController.flushSegment();
-                }
-                // static 模式不 finalize（finalize 会进入终态并造成后续丢失）
-              } else if (kind !== 'block') {
-                // stream 模式：tool/final 时收尾当前打字机流（原行为）
-                await streamingController.finalize();
-              }
-              if (!streamingController.shouldFallbackToStatic) return;
-              dlog?.warn(`streaming fallback to static`);
-            }
+      // ── 1. block: 媒体/语音立即发送，文本留给流式 ──
+      // 注：static 模式已显式 disableBlockStreaming:true，kind:'block' 不会再触发；
+      // 此分支保留以兼容 stream 模式与未来变化。
+      if (kind === 'block') {
+        if (payload.audioAsVoice) {
+          await deliverReply(payload, info, deliverCtx);
+        } else {
+          await forwardMediaUrls(payload, deliverCtx, deliveredMediaUrls, dlog);
+        }
+      }
 
-            // ── 3. 文本去重：同文本已发过 -> 跳过 ──
-            if (kind === 'final' && !hasMedia && text && deliveredTexts.has(text)) {
-              return;
-            }
-
-            // ── 4. tool 媒体：立即转发（static 流式路径已在上方 flush 文本）──
-            if (kind === 'tool') {
-              await forwardMediaUrls(payload, deliverCtx, deliveredMediaUrls, dlog);
-              return;
-            }
-
-            // ── 5. 默认路径：过滤已发媒体 + 发送 ──
-            const filteredPayload = filterDeliveredMedia(payload, deliveredMediaUrls);
-            await deliverReply(filteredPayload, info, deliverCtx);
-            if (text) deliveredTexts.add(text);
-          } catch (err) {
-            dlog?.error(`deliver error: ${err instanceof Error ? err.message : String(err)}`);
+      // ── 2. 流式路径：流式已启动且未降级 -> 跳过静态发送 ──
+      if (streamingController?.hasStarted && !streamingController?.shouldFallbackToStatic) {
+        if (streamingController.isStaticSendMode) {
+          // static 模式：flush 主路径由 onToolStart 驱动（工具开始前，绕开 SDK
+          // block streaming 的 coalescer，避免 minChars=800/idleMs=1000 buffer 延迟）。
+          // 这里仅兜底：deliver(kind:'tool') 时再 flush 一次（controller 内部去重，
+          // buffer 已空时 flushSegment 无副作用）。
+          if (kind === 'tool') {
+            await streamingController.flushSegment();
           }
-        },
-      },
-      replyOptions: {
-        abortSignal: ctx.signal,
-        runId: envelope.messageId,
-        ...(streamingController?.isStaticSendMode
-          ? {
-              // 对齐 telegram 模式一：显式关掉 SDK block streaming，绕开 coalescer
-              // （minChars=800/idleMs=1000 的 buffer 会造成文本延迟）。
-              // 文本由 onPartialReply 累积，边界由 onToolStart 自己监听 flush。
-              disableBlockStreaming: true,
-              // 让 onToolStart 在 verbose 关闭时也能触发
-              // （默认受 requiresToolSummaryVisibility 门控，verbose off 时不触发）
-              allowToolLifecycleWhenProgressHidden: true,
-              // 工具【开始执行前】触发：把已累积的上一段文本立即发出
-              // （不等工具执行完，对齐 telegram prepareAnswerLaneForToolProgress）
-              onToolStart: async () => { await streamingController.flushSegment(); },
-            }
-          : {}),
-        ...(streamingController
-          ? {
-              onPartialReply: async (p: { text?: string }) => {
-                if (p.text) await streamingController.onPartialReply(p.text);
-              },
-              // 兜底：onToolStart 未覆盖的边界（如纯文本段切换、部分 provider 事件差异）
-              // 仍由 onAssistantMessageStart 触发分段。stream 模式不传，保持原行为。
-              onAssistantMessageStart: streamingController.isStaticSendMode
-                ? async () => { await streamingController.flushSegment(); }
-                : undefined,
-            }
-          : {}),
-      },
-    });
-    if (streamingController && !streamingController.isTerminal) {
-      await streamingController.finalize();
+          // static 模式不 finalize（finalize 会进入终态并造成后续丢失）
+        } else if (kind !== 'block') {
+          // stream 模式：tool/final 时收尾当前打字机流（原行为）
+          await streamingController.finalize();
+        }
+        if (!streamingController.shouldFallbackToStatic) return;
+        dlog?.warn(`streaming fallback to static`);
+      }
+
+      // ── 3. 文本去重：同文本已发过 -> 跳过 ──
+      if (kind === 'final' && !hasMedia && text && deliveredTexts.has(text)) {
+        return;
+      }
+
+      // ── 4. tool 媒体：立即转发（static 流式路径已在上方 flush 文本）──
+      if (kind === 'tool') {
+        await forwardMediaUrls(payload, deliverCtx, deliveredMediaUrls, dlog);
+        return;
+      }
+
+      // ── 5. 默认路径：过滤已发媒体 + 发送 ──
+      const filteredPayload = filterDeliveredMedia(payload, deliveredMediaUrls);
+      await deliverReply(filteredPayload, info, deliverCtx);
+      if (text) deliveredTexts.add(text);
+    } catch (err) {
+      deliverErrorCount++;
+      dlog?.error(`deliver error: ${err instanceof Error ? err.message : String(err)}`);
     }
-    if (debouncer) await debouncer.flushAll();
-  } else {
-    await adapters.inboundRun!({
-      channel: 'qqbot',
-      accountId: route.accountId,
-      raw: envelope,
-      adapter: {
-        ingest: (raw: any) => ({
-          id: envelope.messageId,
-          rawText: assembled.rawBody,
-          textForAgent: assembled.agentBody,
-          textForCommands: assembled.rawBody,
-          raw,
-        }),
-        resolveTurn: (_input: unknown, _eventClass: unknown, _preflight: unknown) => ({
-          channel: 'qqbot',
-          accountId: route.accountId,
-          routeSessionKey: route.sessionKey,
-          storePath,
-          ctxPayload,
-          recordInboundSession: adapters.recordInboundSession,
-          record: {
-            onRecordError: (err: unknown) => {
-              dlog?.error(`Session record error: ${err}`);
-            },
-          },
-          runDispatchLifecycle: {
-            turnAdoptionLifecycle: undefined,
-            onDispatchSkipped: (reason: string) => {
-              dlog?.info(`dispatch skipped reason=${reason} sessionKey=${route.sessionKey}`);
-            },
-          },
-          runDispatch: () => {
-            return adapters.dispatchReply!({
-              ctx: ctxPayload,
-              cfg,
-              dispatcherOptions: {
-                deliver: async (payload: DeliverPayload, info?: DeliverInfo) => {
-                  try {
-                    const kind = (info as any)?.kind as string | undefined;
-                    const text = payload.text?.trim() ?? '';
-                    const hasMedia = !!(payload.mediaUrl || payload.mediaUrls?.length);
-                    dlog?.debug(`deliver kind=${kind ?? 'none'} textLen=${text.length} voice=${!!payload.audioAsVoice} media=${hasMedia}`);
+  };
 
-                    // ── 1. block: 媒体/语音立即发送，文本留给流式 ──
-                    // 注：static 模式已显式 disableBlockStreaming:true，kind:'block' 不会再触发；
-                    // 此分支保留以兼容 stream 模式与未来变化。
-                    if (kind === 'block') {
-                      if (payload.audioAsVoice) {
-                        await deliverReply(payload, info, deliverCtx);
-                      } else {
-                        await forwardMediaUrls(payload, deliverCtx, deliveredMediaUrls, dlog);
-                      }
-                    }
-
-                    // ── 2. 流式路径：流式已启动且未降级 -> 跳过静态发送 ──
-                    if (streamingController?.hasStarted && !streamingController?.shouldFallbackToStatic) {
-                      if (streamingController.isStaticSendMode) {
-                        // static 模式：flush 主路径由 onToolStart 驱动（工具开始前，绕开 SDK
-                        // block streaming 的 coalescer，避免 minChars=800/idleMs=1000 buffer 延迟）。
-                        // 这里仅兜底：deliver(kind:'tool') 时再 flush 一次（controller 内部去重，
-                        // buffer 已空时 flushSegment 无副作用）。
-                        if (kind === 'tool') {
-                          await streamingController.flushSegment();
-                        }
-                        // static 模式不 finalize（finalize 会进入终态并造成后续丢失）
-                      } else if (kind !== 'block') {
-                        // stream 模式：tool/final 时收尾当前打字机流（原行为）
-                        await streamingController.finalize();
-                      }
-                      if (!streamingController.shouldFallbackToStatic) return;
-                      dlog?.warn(`streaming fallback to static`);
-                    }
-
-                    // ── 3. 文本去重：同文本已发过 → 跳过 ──
-                    if (kind === 'final' && !hasMedia && text && deliveredTexts.has(text)) {
-                      return;
-                    }
-
-                    // ── 4. tool 媒体：立即转发（static 流式路径已在上方 flush 文本）──
-                    if (kind === 'tool') {
-                      await forwardMediaUrls(payload, deliverCtx, deliveredMediaUrls, dlog);
-                      return;
-                    }
-
-                    // ── 5. 默认路径：过滤已发媒体 + 发送 ──
-                    const filteredPayload = filterDeliveredMedia(payload, deliveredMediaUrls);
-                    await deliverReply(filteredPayload, info, deliverCtx);
-                    if (text) deliveredTexts.add(text);
-                  } catch (err) {
-                    dlog?.error(`deliver error: ${err instanceof Error ? err.message : String(err)}`);
-                  }
-                },
-            },
-            replyOptions: {
-              abortSignal: ctx.signal,
-              runId: envelope.messageId,
-              ...(streamingController?.isStaticSendMode
-                ? {
-                    // 对齐 telegram 模式一：显式关掉 SDK block streaming，绕开 coalescer
-                    // （minChars=800/idleMs=1000 的 buffer 会造成文本延迟）。
-                    // 文本由 onPartialReply 累积，边界由 onToolStart 自己监听 flush。
-                    disableBlockStreaming: true,
-                    // 让 onToolStart 在 verbose 关闭时也能触发
-                    // （默认受 requiresToolSummaryVisibility 门控，verbose off 时不触发）
-                    allowToolLifecycleWhenProgressHidden: true,
-                    // 工具【开始执行前】触发：把已累积的上一段文本立即发出
-                    // （不等工具执行完，对齐 telegram prepareAnswerLaneForToolProgress）
-                    onToolStart: async () => { await streamingController.flushSegment(); },
-                  }
-                : {}),
-              ...(streamingController
-                ? {
-                    onPartialReply: async (p: { text?: string }) => {
-                      if (p.text) await streamingController.onPartialReply(p.text);
-                    },
-                    // 兜底：block 信号未覆盖的边界（如部分 provider 不发 text_end）
-                    // 仍由 onAssistantMessageStart 触发分段。stream 模式不传，保持原行为。
-                    onAssistantMessageStart: streamingController.isStaticSendMode
-                      ? async () => { await streamingController.flushSegment(); }
-                      : undefined,
-                  }
-                : {}),
-            },
-          });
-        },
-      }),
+  // Turn adoption lifecycle（对齐 telegram）：
+  // - abortSignal：排队中的 turn 被新消息取代（superseded）时，框架中止旧 turn；
+  //   与请求级 ctx.signal 合并后作为 agent run 的 AbortSignal。
+  // - onAdopted/onDeferred/onAbandoned：无 spool 场景下仅做可观测性日志。
+  const turnAbort = new AbortController();
+  const turnAdoptionLifecycle = {
+    admission: 'exclusive' as const,
+    abortSignal: turnAbort.signal,
+    onAdopted: () => {
+      dlog?.debug(`turn adopted sessionKey=${route.sessionKey}`);
     },
-  });
+    onDeferred: () => {
+      dlog?.debug(`turn deferred behind active turn sessionKey=${route.sessionKey}`);
+    },
+    onAbandoned: () => {
+      dlog?.info(`turn abandoned (superseded) — aborting sessionKey=${route.sessionKey}`);
+      turnAbort.abort();
+    },
+  };
+  const combinedAbortSignal = combineAbortSignals(ctx.signal, turnAbort.signal);
+
+  let dispatchError: unknown;
+  const hadDispatchError = () => dispatchError !== undefined;
+
+  try {
+    if (!adapters.inboundRun) {
+      // 低版本：手动 session + dispatchReply 直调
+      if (adapters.recordInboundSession) {
+        try {
+          await adapters.recordInboundSession({
+            storePath,
+            sessionKey: route.sessionKey,
+            ctx: ctxPayload,
+          });
+        } catch { /* best-effort */ }
+      }
+      await adapters.dispatchReply!({
+        ctx: ctxPayload,
+        cfg,
+        dispatcherOptions: {
+          deliver: deliverHandler,
+        },
+        replyOptions: {
+          abortSignal: ctx.signal,
+          runId: envelope.messageId,
+          ...(streamingController?.isStaticSendMode
+            ? {
+                // 对齐 telegram 模式一：显式关掉 SDK block streaming，绕开 coalescer
+                // （minChars=800/idleMs=1000 的 buffer 会造成文本延迟）。
+                // 文本由 onPartialReply 累积，边界由 onToolStart 自己监听 flush。
+                disableBlockStreaming: true,
+                // 让 onToolStart 在 verbose 关闭时也能触发
+                // （默认受 requiresToolSummaryVisibility 门控，verbose off 时不触发）
+                allowToolLifecycleWhenProgressHidden: true,
+                // 工具【开始执行前】触发：把已累积的上一段文本立即发出
+                // （不等工具执行完，对齐 telegram prepareAnswerLaneForToolProgress）
+                onToolStart: async () => { await streamingController.flushSegment(); },
+              }
+            : {}),
+          ...(streamingController
+            ? {
+                onPartialReply: async (p: { text?: string }) => {
+                  if (p.text) await streamingController.onPartialReply(p.text);
+                },
+                // 兜底：onToolStart 未覆盖的边界（如纯文本段切换、部分 provider 事件差异）
+                // 仍由 onAssistantMessageStart 触发分段。stream 模式不传，保持原行为。
+                onAssistantMessageStart: streamingController.isStaticSendMode
+                  ? async () => { await streamingController.flushSegment(); }
+                  : undefined,
+              }
+            : {}),
+        },
+      });
+      if (streamingController && !streamingController.isTerminal) {
+        await streamingController.finalize();
+      }
+      if (debouncer) await debouncer.flushAll();
+    } else {
+      await adapters.inboundRun!({
+        channel: 'qqbot',
+        accountId: route.accountId,
+        raw: envelope,
+        adapter: {
+          ingest: (raw: any) => ({
+            id: envelope.messageId,
+            rawText: assembled.rawBody,
+            textForAgent: assembled.agentBody,
+            textForCommands: assembled.rawBody,
+            raw,
+          }),
+          resolveTurn: (_input: unknown, _eventClass: unknown, _preflight: unknown) => ({
+            channel: 'qqbot',
+            accountId: route.accountId,
+            routeSessionKey: route.sessionKey,
+            storePath,
+            ctxPayload,
+            recordInboundSession: adapters.recordInboundSession,
+            record: {
+              onRecordError: (err: unknown) => {
+                dlog?.error(`Session record error: ${err}`);
+              },
+            },
+            runDispatchLifecycle: {
+              // 同一 lifecycle 对象必须同时出现在 runDispatchLifecycle 与
+              // replyOptions.turnAdoptionLifecycle（框架校验所有权一致性）。
+              turnAdoptionLifecycle,
+              onDispatchSkipped: (reason: string) => {
+                dlog?.info(`dispatch skipped reason=${reason} sessionKey=${route.sessionKey}`);
+              },
+            },
+            runDispatch: () => {
+              return adapters.dispatchReply!({
+                ctx: ctxPayload,
+                cfg,
+                dispatcherOptions: {
+                  deliver: deliverHandler,
+                },
+                replyOptions: {
+                  abortSignal: combinedAbortSignal,
+                  runId: envelope.messageId,
+                  turnAdoptionLifecycle,
+                  ...(streamingController?.isStaticSendMode
+                    ? {
+                        // 对齐 telegram 模式一：显式关掉 SDK block streaming，绕开 coalescer
+                        // （minChars=800/idleMs=1000 的 buffer 会造成文本延迟）。
+                        // 文本由 onPartialReply 累积，边界由 onToolStart 自己监听 flush。
+                        disableBlockStreaming: true,
+                        // 让 onToolStart 在 verbose 关闭时也能触发
+                        // （默认受 requiresToolSummaryVisibility 门控，verbose off 时不触发）
+                        allowToolLifecycleWhenProgressHidden: true,
+                        // 工具【开始执行前】触发：把已累积的上一段文本立即发出
+                        // （不等工具执行完，对齐 telegram prepareAnswerLaneForToolProgress）
+                        onToolStart: async () => { await streamingController.flushSegment(); },
+                      }
+                    : {}),
+                  ...(streamingController
+                    ? {
+                        onPartialReply: async (p: { text?: string }) => {
+                          if (p.text) await streamingController.onPartialReply(p.text);
+                        },
+                        // 兜底：block 信号未覆盖的边界（如部分 provider 不发 text_end）
+                        // 仍由 onAssistantMessageStart 触发分段。stream 模式不传，保持原行为。
+                        onAssistantMessageStart: streamingController.isStaticSendMode
+                          ? async () => { await streamingController.flushSegment(); }
+                          : undefined,
+                      }
+                    : {}),
+                },
+              });
+            },
+          }),
+        },
+      });
+    }
+  } catch (err) {
+    dispatchError = err;
+    dlog?.error(`dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
   }
- 
-  dlog?.debug(`inboundRun completed sessionKey=${route.sessionKey}`);
+
+  dlog?.debug(`dispatch completed sessionKey=${route.sessionKey}`);
 
   // 群消息回复后清空历史缓存（避免下次 @ 时重复组包）
   if (envelope.chatScope === 'group') {
@@ -377,6 +396,40 @@ export async function dispatchToOpenClaw(
 
   if (debouncer) {
     await debouncer.flushAll();
+  }
+
+  // 失败兜底（对齐 telegram）：dispatch 抛错、deliver 抛错或底层发送失败，
+  // 且用户未收到任何可见回复时，发送兜底消息而非静默失败。
+  if ((hadDispatchError() || deliverErrorCount > 0 || outboundSendFail > 0) && !turnAbort.signal.aborted) {
+    const streamedVisible = !!streamingController
+      && streamingController.currentPhase !== 'failed'
+      && (streamingController.currentPhase === 'done' || streamingController.hasSentChunks);
+    const deliveredVisible =
+      streamedVisible || outboundSendOk > 0 || deliveredMediaUrls.size > 0;
+    if (!deliveredVisible) {
+      dlog?.warn(
+        `sending failure fallback (deliverErrors=${deliverErrorCount} sendFails=${outboundSendFail} dispatchError=${hadDispatchError()}) to ${qualifiedTarget}`,
+      );
+      try {
+        const result = await sendText({
+          to: qualifiedTarget,
+          text: FAILURE_FALLBACK_TEXT,
+          accountId: account.accountId,
+          replyToId: envelope.messageId,
+          account,
+        });
+        if (result.error) {
+          dlog?.error(`failure fallback sendText failed: ${result.error}`);
+        }
+      } catch (err) {
+        dlog?.error(`failure fallback failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
+  // 保持原有错误传播语义：错误上报给 event-handlers 记录日志
+  if (hadDispatchError()) {
+    throw dispatchError;
   }
 }
 
