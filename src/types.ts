@@ -173,15 +173,20 @@ export interface QQBotAccountConfig {
    */
   stt?: STTChannelConfig;
   /**
-   * 单条消息最大处理时间（毫秒）。
-   *
-   * 注意：此配置目前已不再使用，因为已移除插件级的 concurrencyGuard 中间件，
-   * 并发控制由 OpenClaw 框架的 session lane 机制处理。
-   *
-   * 设为 0 表示不限制超时。默认 0（不限制）。
-   *
-   * 可通过环境变量 OPENCLAW_PROCESSING_TIMEOUT_MS 覆盖全局默认值，
-   * 账户级配置优先级高于环境变量。
+   * ⚠️ 已废弃 - 此配置已不再使用
+   * 
+   * 原用途：单条消息最大处理时间（毫秒），由已移除的 concurrencyGuard 中间件实现超时保护。
+   * 
+   * 移除 concurrencyGuard 后的影响：
+   * - 此配置字段被读取但不会产生任何超时行为
+   * - 环境变量 OPENCLAW_PROCESSING_TIMEOUT_MS 也被忽略
+   * - 框架级的 session lane 没有提供消息级超时机制
+   * 
+   * 如果需要超时保护，请考虑：
+   * - 在 OpenClaw 框架配置中设置全局超时
+   * - 或等待插件重新实现消息级超时机制
+   * 
+   * @deprecated Since v2.0.1 - concurrencyGuard 已移除
    */
   processingTimeoutMs?: number;
   /**

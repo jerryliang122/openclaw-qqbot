@@ -53,15 +53,19 @@ export async function dispatchToOpenClaw(
 
   const cfg = adapters.getConfig?.() ?? {};
 
+  const peerId = envelope.chatScope === 'group' 
+    ? (envelope.groupId ?? envelope.senderId) 
+    : envelope.senderId;
+
   const route = adapters.resolveAgentRoute?.({
     cfg,
     channel: 'qqbot',
     accountId: account.accountId,
     peer: {
       kind: envelope.chatScope === 'group' ? 'group' : 'direct',
-      id: envelope.chatScope === 'group' ? (envelope.groupId ?? envelope.senderId) : envelope.senderId,
+      id: peerId,
     },
-  }) ?? { sessionKey: `qqbot:${account.accountId}:${envelope.senderId}`, accountId: account.accountId };
+  }) ?? { sessionKey: `qqbot:${account.accountId}:${peerId}`, accountId: account.accountId };
 
   const qualifiedTarget = envelope.targetId;
   const agentId = route.agentId ?? 'default';
