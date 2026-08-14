@@ -38,6 +38,20 @@ function resolveMsgId(replyToId: string | undefined, accountId: string): string 
   return replyToId;
 }
 
+/**
+ * 尝试为 typing 指示器占用一个被动回复配额（带 msg_id 发送）。
+ *
+ * typing 通知与回复消息共享同一 msg_id 的被动回复配额，必须经同一
+ * limiter 记账。配额不可用时调用方应降级为主动发送（不带 msg_id），
+ * 与回复消息的降级策略（resolveMsgId）保持一致。
+ *
+ * @returns 是否占得被动配额；false 表示应不带 msg_id 主动发送
+ */
+export function tryAcquirePassiveSlot(accountId: string, msgId: string | undefined): boolean {
+  if (!msgId) return false; // 无 msg_id 无法走被动通道
+  return getLimiter(accountId).tryAcquire(msgId);
+}
+
 export function registerGateway(accountId: string, gw: QQBotGateway): void {
   gateways.set(accountId, gw);
 }

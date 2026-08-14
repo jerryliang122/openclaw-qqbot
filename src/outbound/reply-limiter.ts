@@ -109,6 +109,17 @@ export class ReplyLimiter {
   }
 
   /**
+   * 尝试占用一个被动回复配额（检查 + 记录原子完成）。
+   * 用于 typing 等非回复用途：占用失败时调用方应降级为主动发送（不带 msg_id）。
+   */
+  tryAcquire(messageId: string): boolean {
+    const result = this.checkLimit(messageId);
+    if (!result.allowed) return false;
+    this.record(messageId);
+    return true;
+  }
+
+  /**
    * 获取统计信息
    */
   getStats(): { trackedMessages: number; totalReplies: number } {

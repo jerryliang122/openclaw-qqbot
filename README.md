@@ -670,6 +670,28 @@ STT supports two-level configuration with priority fallback:
 - Set `enabled: false` to disable (default: `true`)
 - When configured, AI can generate and send voice messages
 
+#### Typing Indicator — C2C private chat only
+
+After receiving a private message, the bot shows "typing…" and renews it periodically while the AI is processing.
+
+```json
+{
+  "channels": {
+    "qqbot": {
+      "typing": {
+        "enabled": true,
+        "intervalMs": 20000
+      }
+    }
+  }
+}
+```
+
+- `enabled` — enable/disable the indicator (default: `true`)
+- `intervalMs` — renewal interval in milliseconds (default: `20000`). The QQ client clears the indicator when the user leaves and re-enters the chat; only a fresh push re-shows it, hence the periodic renewal. Values below `20000` are clamped to `20000` (QPS constraint)
+- **Quota note**: typing notifications share the passive-reply quota of the user message they reply to (QQ Open Platform allows ~5 passive replies per message). Once the passive quota is exhausted, typing — just like reply messages — automatically falls back to proactive sending (no msg_id); renewal is never interrupted
+- **Intermediate-message refresh**: when the bot sends a message (e.g. chain-of-thought intermediate output), the QQ client terminates the indicator; if the framework task is still running, the plugin renews the indicator 5 seconds after the message (still guarded by the 20s QPS spacing). After the final reply completes the task, no further refresh is sent
+
 ---
 
 ## 📚 Documentation & Links

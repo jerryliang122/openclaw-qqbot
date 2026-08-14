@@ -19,7 +19,6 @@ import {
   quoteRef,
   historyBuffer,
   envelopeFormatter,
-  typingIndicator,
   slashCommand,
   errorHandler,
 } from '@tencent-connect/qqbot-nodejs';
@@ -31,6 +30,7 @@ import { getPersistedRefIndexStore } from '../features/ref-index-store.js';
 import { createPolicyInjector } from '../middleware/policy-injector.js';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.js';
 import { dynamicAccessControl } from '../middleware/access-control.js';
+import { c2cTypingIndicator } from '../middleware/typing.js';
 import { stripMentionText } from '../utils/mention.js';
 
 export interface MiddlewareSetupOptions {
@@ -86,8 +86,16 @@ export function setupMiddlewares(bot: QQBot, account: ResolvedQQBotAccount, opts
   const slash = slashCommand({ commands: buildCommandList(account, { getRuntime: opts.getRuntime }) });
   bot.use(slash.middleware);
 
-  // 10. C2C 输入状态指示器
-  bot.use(typingIndicator());
+  // 10. C2C 输入状态指示器（配额感知：优先占被动回复配额，耗尽后与回复
+  //     消息一样降级为主动发送；续期间隔默认 20s 且不低于 20s，
+  //     详见 src/middleware/typing.ts）
+  const typingCfg = account.config.typing;
+  if (typingCfg?.enabled !== false) {
+    bot.use(c2cTypingIndicator({
+      accountId: account.accountId,
+      intervalMs: typingCfg?.intervalMs,
+    }));
+  }
 
   // 11. 引用消息解析（默认优先 msg_elements 获取文件名等丰富信息）
   bot.use(quoteRef({

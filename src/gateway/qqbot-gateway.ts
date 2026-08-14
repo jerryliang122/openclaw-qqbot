@@ -25,6 +25,7 @@ import { buildUserAgent } from '../bot-instance.js';
 import { createPluginWebhookAdapter } from '../adapter/webhook.js';
 import { getPersistedRefIndexStore } from '../features/ref-index-store.js';
 import { getCachedMsgId } from '../features/msgid-cache.js';
+import { notifyOutboundMessageSent } from '../features/typing-refresh.js';
 
 export interface GatewayCallbacks {
   onReady?: () => void;
@@ -149,10 +150,12 @@ export class QQBotGateway {
   }
 
   async sendText(target: ReplyTarget, text: string, opts?: SendOptions): Promise<MessageResponse> {
-    return withTimeout(
+    const result = await withTimeout(
       this.bot.sendText(attachMsgId(target, opts), text),
       this.textTimeout, 'sendText',
     );
+    this.notifyTypingRefresh(target);
+    return result;
   }
 
   async sendMedia(
@@ -167,6 +170,7 @@ export class QQBotGateway {
       this.bot.sendMedia({ target: resolvedTarget, fileType, ...sourceOpts, content: opts?.text }),
       this.mediaTimeout, 'sendMedia',
     );
+    this.notifyTypingRefresh(target);
     return result.message ?? { id: '', timestamp: Date.now() };
   }
 
@@ -182,6 +186,7 @@ export class QQBotGateway {
         this.bot.sendMedia({ target: resolvedTarget, fileType: MediaFileType.VOICE, fileData: source.base64, content: opts?.text }),
         this.mediaTimeout, 'sendVoice(base64)',
       );
+      this.notifyTypingRefresh(target);
       return result.message ?? { id: '', timestamp: Date.now() };
     }
     if (source.localPath) {
@@ -189,12 +194,14 @@ export class QQBotGateway {
         this.bot.sendMedia({ target: resolvedTarget, fileType: MediaFileType.VOICE, localPath: source.localPath, content: opts?.text }),
         this.mediaTimeout, 'sendVoice(path)',
       );
+      this.notifyTypingRefresh(target);
       return result.message ?? { id: '', timestamp: Date.now() };
     }
     const result = await withTimeout(
       this.bot.sendMedia({ target: resolvedTarget, fileType: MediaFileType.VOICE, url: source.url!, content: opts?.text }),
       this.mediaTimeout, 'sendVoice(url)',
     );
+    this.notifyTypingRefresh(target);
     return result.message ?? { id: '', timestamp: Date.now() };
   }
 
@@ -209,6 +216,7 @@ export class QQBotGateway {
       this.bot.sendMedia({ target: resolvedTarget, fileType: MediaFileType.VIDEO, ...sourceOpts, content: opts?.text }),
       this.mediaTimeout, 'sendVideo',
     );
+    this.notifyTypingRefresh(target);
     return result.message ?? { id: '', timestamp: Date.now() };
   }
 
@@ -223,6 +231,7 @@ export class QQBotGateway {
       this.bot.sendMedia({ target: resolvedTarget, fileType: MediaFileType.FILE, ...sourceOpts, fileName: opts?.fileName, content: opts?.text }),
       this.mediaTimeout, 'sendFile',
     );
+    this.notifyTypingRefresh(target);
     return result.message ?? { id: '', timestamp: Date.now() };
   }
 
@@ -234,6 +243,15 @@ export class QQBotGateway {
 
   async sendTyping(target: ReplyTarget): Promise<void> {
     await this.bot.sendTyping(target);
+  }
+
+  /**
+   * 消息发送成功后通知活跃的 typing 会话补发续期。
+   * QQ 客户端收到机器人消息（含思维链等中间输出）会终止"正在输入"
+   * 显示；若框架任务仍在进行，typing 中间件会在 5s 后补发恢复显示。
+   */
+  private notifyTypingRefresh(target: ReplyTarget): void {
+    notifyOutboundMessageSent(this.account.accountId, target.scope, target.targetId);
   }
 
   private wrapBotSendForRefIndex(): void {

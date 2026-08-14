@@ -70,7 +70,7 @@ test('应该注册 errorHandler 作为第一个中间件', () => {
   mockBot.use(function contentSanitizer() {});
   mockBot.use(function rateLimiter() {});
   mockBot.use(function slashCommand() {});
-  mockBot.use(function typingIndicator() {});
+  mockBot.use(function c2cTypingIndicator() {});
   mockBot.use(function quoteRef() {});
   mockBot.use(function attachmentProcessor() {});
   mockBot.use(function envelopeFormatter() {});
@@ -143,10 +143,10 @@ test('斜杠命令应该在限流之后', () => {
 
 test('引用消息解析应该在输入状态之后', () => {
   const quoteRefIndex = mockMiddlewares.indexOf('quoteRef');
-  const typingIndicatorIndex = mockMiddlewares.indexOf('typingIndicator');
+  const typingIndicatorIndex = mockMiddlewares.indexOf('c2cTypingIndicator');
   
   assert.ok(quoteRefIndex > typingIndicatorIndex, 
-    `quoteRef (index ${quoteRefIndex}) 应该在 typingIndicator (index ${typingIndicatorIndex}) 之后`);
+    `quoteRef (index ${quoteRefIndex}) 应该在 c2cTypingIndicator (index ${typingIndicatorIndex}) 之后`);
 });
 
 test('附件处理应该在引用消息解析之后', () => {

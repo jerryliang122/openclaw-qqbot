@@ -144,6 +144,10 @@ export interface QQBotAccountConfig {
    */
   deliverDebounce?: DeliverDebounceConfig;
   /**
+   * "正在输入"指示器配置（仅 C2C 私聊生效）
+   */
+  typing?: TypingIndicatorConfig;
+  /**
    * 是否启用流式消息（默认 false）
    * 启用后，AI 的回复会以流式形式逐步显示在 QQ 聊天中，
    * 用户可以看到文字逐字出现的打字机效果。
@@ -220,6 +224,32 @@ export interface DeliverDebounceConfig {
    * 默认 "\n\n---\n\n"
    */
   separator?: string;
+}
+
+/**
+ * "正在输入"指示器配置
+ *
+ * QQ 客户端行为：退出聊天界面再进入后，指示器会消失，只有收到新的
+ * input_notify 推送才会重新显示，因此处理期间需要周期性续期。
+ *
+ * 配额说明：typing 通知与回复消息共享同一 msg_id 的被动回复配额
+ * （QQ 开放平台同一条消息被动回复上限约 5 条）。被动配额耗尽后，
+ * typing 与回复消息一样自动降级为主动发送（不带 msg_id），续期不中断。
+ *
+ * 中间消息：机器人发出消息（如思维链中间输出）后，QQ 客户端会终止
+ * 指示器显示。若框架任务仍在进行，插件会在消息发出 5 秒后补发一次
+ * 续期；若是最终回复（任务完成），则不再补发。
+ */
+export interface TypingIndicatorConfig {
+  /**
+   * 是否启用指示器（默认 true）
+   */
+  enabled?: boolean;
+  /**
+   * 续期间隔（毫秒），默认 20000
+   * 受 QPS 限制，低于 20000 会被钳制到 20000
+   */
+  intervalMs?: number;
 }
 
 /**
