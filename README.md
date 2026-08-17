@@ -175,7 +175,7 @@ Measures end-to-end latency from QQ server push to plugin response, broken down 
 
 > **You**: `/bot-version`
 >
-> **QQBot**: 🦞 Framework: OpenClaw 2026.3.13 (61d171a) / 🤖 Plugin: v1.6.3 / 🌟 GitHub repo
+> **QQBot**: 🦞 Framework: OpenClaw 2026.3.13 (61d171a) / 🤖 Plugin: v2.0.1 / 🌟 GitHub repo
 
 Shows framework version, plugin version, and a direct link to the official repository.
 
@@ -193,7 +193,7 @@ Shows framework version, plugin version, and a direct link to the official repos
 
 > **You**: `/bot-upgrade`
 >
-> **QQBot**: 📌 Current: v1.6.3 / ✅ New version v1.6.4 available / Click button below to confirm
+> **QQBot**: 📌 Current: v2.0.0 / ✅ New version v2.0.1 available / Click button below to confirm
 
 Credentials are automatically backed up before upgrade. Version existence is verified against npm before proceeding. Auto-recovery on failure.
 
@@ -669,6 +669,23 @@ STT supports two-level configuration with priority fallback:
 - `voice` — voice variant
 - Set `enabled: false` to disable (default: `true`)
 - When configured, AI can generate and send voice messages
+- `asrFallback` — platform ASR fallback switch (default: `false`, strict mode). When your own STT is configured and successfully runs, QQ's built-in `asr_refer_text` is **not** used as a fallback and is not carried into the AI context (no `- ASR:` line). Set `asrFallback: true` to restore the old behavior of falling back to the platform transcript when your STT returns empty or fails
+
+**Strict-mode example (recommended):**
+
+```json
+{
+  "channels": {
+    "qqbot": {
+      "stt": {
+        "provider": "your-provider",
+        "model": "your-stt-model",
+        "asrFallback": false
+      }
+    }
+  }
+}
+```
 
 #### Typing Indicator — C2C private chat only
 
