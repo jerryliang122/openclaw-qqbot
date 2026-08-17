@@ -15,7 +15,7 @@ import {
   isVoiceAttachment,
 } from '@tencent-connect/qqbot-nodejs/protocol';
 import type { MessageAttachment } from '../types.js';
-import { transcribeAudio, resolveSTTConfig } from '../utils/stt.js';
+import { transcribeAudio, resolveSTTConfig, shouldUsePlatformAsr } from '../utils/stt.js';
 import { formatVoiceText, formatDuration, type VoiceTranscript, type TranscriptSource } from '../utils/voice-text.js';
 import { downloadRemoteMedia } from '../adapter/media.js';
 import { getAdapters } from '../adapter/resolve.js';
@@ -213,7 +213,12 @@ async function processVoiceAttachment(
   audioPolicy: AudioPolicyResolved,
   log?: Log,
 ): Promise<VoiceTranscript> {
-  const asrReferText = att.asr_refer_text?.trim() || undefined;
+  // 严格模式（默认，telegram 模式）：自有 STT 已生效时平台转写（asr_refer_text）
+  // 在此直接丢弃——不当兜底、不挂 asrReferText（- ASR: 行随之消失），
+  // 三条泄漏路径（转写成功携带 / 转写失败回退 / 下载失败回退）一并堵死。
+  // asrFallback: true 或未配置 STT 时保留旧行为（平台转写参与）。
+  const rawAsrText = att.asr_refer_text?.trim() || undefined;
+  const asrReferText = shouldUsePlatformAsr(sttCfg) ? rawAsrText : undefined;
   // 远端 URL 兜底：优先 wav_url，其次原始 url
   const remoteUrl = normalizeUrl(att.voice_wav_url) || normalizeUrl(att.url) || undefined;
 

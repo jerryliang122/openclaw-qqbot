@@ -14,6 +14,24 @@ export interface STTConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /**
+   * 平台转写（asr_refer_text）兜底开关。
+   * - false（默认，telegram 模式）：配置了自有 STT 后，平台转写完全不参与——
+   *   不当兜底、不携带 asrReferText（避免 - ASR: 行把平台文本带进 core）。
+   * - true：自有 STT 失败/转空时退回平台转写（旧行为）。
+   * 从 channels.qqbot.stt.asrFallback 读取，对插件级与框架探测级 STT 均生效。
+   */
+  asrFallback: boolean;
+}
+
+/**
+ * 平台转写（asr_refer_text）参与判定。
+ * 仅当未配置 STT（平台转写是唯一来源）或显式 asrFallback: true 时保留；
+ * 严格模式下（自有 STT 已生效且未开兜底）平台文本在上游就被丢弃。
+ */
+export function shouldUsePlatformAsr(sttCfg: STTConfig | null): boolean {
+  if (!sttCfg) return true;
+  return sttCfg.asrFallback === true;
 }
 
 /**
@@ -29,6 +47,9 @@ export function resolveSTTConfig(cfg: Record<string, unknown>): STTConfig | null
     return null;
   }
 
+  // 平台转写兜底默认关闭（telegram 模式）；显式 asrFallback: true 才启用
+  const asrFallback = sttCfg?.asrFallback === true;
+
   const models = asRecord(cfg.models);
   const providers = asRecord(models?.providers);
 
@@ -40,7 +61,7 @@ export function resolveSTTConfig(cfg: Record<string, unknown>): STTConfig | null
     const apiKey = readString(sttCfg, 'apiKey') ?? readString(providerCfg, 'apiKey');
     const model = readString(sttCfg, 'model') ?? 'whisper-1';
     if (baseUrl && apiKey) {
-      return { enabled: true, baseUrl: baseUrl.replace(/\/+$/, ''), apiKey, model };
+      return { enabled: true, baseUrl: baseUrl.replace(/\/+$/, ''), apiKey, model, asrFallback };
     }
   }
 
@@ -57,7 +78,7 @@ export function resolveSTTConfig(cfg: Record<string, unknown>): STTConfig | null
     const apiKey = readString(audioModelEntry, 'apiKey') ?? readString(providerCfg, 'apiKey');
     const model = readString(audioModelEntry, 'model') ?? 'whisper-1';
     if (baseUrl && apiKey) {
-      return { enabled: true, baseUrl: baseUrl.replace(/\/+$/, ''), apiKey, model };
+      return { enabled: true, baseUrl: baseUrl.replace(/\/+$/, ''), apiKey, model, asrFallback };
     }
   }
 
