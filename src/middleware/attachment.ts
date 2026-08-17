@@ -91,12 +91,13 @@ export function attachmentProcessor(opts: AttachmentMiddlewareOptions) {
 
 type Log = { info: (m: string) => void; error: (m: string) => void; debug?: (m: string) => void };
 
-async function processAttachments(
+export async function processAttachments(
   attachments: MessageAttachment[],
   cfg: Record<string, unknown>,
   log?: Log,
 ): Promise<ProcessedAttachments> {
   const sttCfg = resolveSTTConfig(cfg);
+  const usePlatformAsr = shouldUsePlatformAsr(cfg);
   const audioPolicy = resolveAudioPolicy(cfg);
 
   const imageUrls: string[] = [];
@@ -119,7 +120,7 @@ async function processAttachments(
     }
 
     if (isVoice) {
-      const transcript = await processVoiceAttachment(att, sttCfg, audioPolicy, log);
+      const transcript = await processVoiceAttachment(att, sttCfg, usePlatformAsr, audioPolicy, log);
       return { type: 'voice' as const, transcript };
     }
 
@@ -210,22 +211,26 @@ function kindFromContentType(contentType: string | undefined): InboundMediaEntry
 async function processVoiceAttachment(
   att: MessageAttachment,
   sttCfg: ReturnType<typeof resolveSTTConfig>,
+  usePlatformAsr: boolean,
   audioPolicy: AudioPolicyResolved,
   log?: Log,
 ): Promise<VoiceTranscript> {
-  // 严格模式（默认，telegram 模式）：自有 STT 已生效时平台转写（asr_refer_text）
-  // 在此直接丢弃——不当兜底、不挂 asrReferText（- ASR: 行随之消失），
-  // 三条泄漏路径（转写成功携带 / 转写失败回退 / 下载失败回退）一并堵死。
-  // asrFallback: true 或未配置 STT 时保留旧行为（平台转写参与）。
+  // 平台转写（asr_refer_text）仅在显式 asrFallback: true 时参与；
+  // 缺省/false 时在所有场景下丢弃——包括 STT 未配置（语音落占位文本）
+  // 与 STT 失败（不当兜底），三条泄漏路径（转写成功携带 / 转写失败回退 /
+  // 下载失败回退）一并堵死。
   const rawAsrText = att.asr_refer_text?.trim() || undefined;
-  const asrReferText = shouldUsePlatformAsr(sttCfg) ? rawAsrText : undefined;
+  const asrReferText = usePlatformAsr ? rawAsrText : undefined;
   // 远端 URL 兜底：优先 wav_url，其次原始 url
   const remoteUrl = normalizeUrl(att.voice_wav_url) || normalizeUrl(att.url) || undefined;
 
-  // STT 未配置：直接走 ASR / fallback
+  // STT 未配置：占位文本；显式 asrFallback: true 时退回平台转写
   if (!sttCfg) {
+    if (!usePlatformAsr && rawAsrText) {
+      log?.info(`Voice: STT not configured; platform asr_refer_text discarded (asrFallback not enabled)`);
+    }
     if (asrReferText) {
-      log?.debug?.(`Voice: using asr_refer_text (STT not configured)`);
+      log?.debug?.(`Voice: using asr_refer_text (STT not configured, asrFallback enabled)`);
       return { text: asrReferText, source: 'asr', asrReferText, remoteUrl };
     }
     return {

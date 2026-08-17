@@ -4,6 +4,19 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)。
 
+## [2.1.0] - 2026-08-17
+
+### 变更
+
+- **收紧 `asrFallback` 语义**：除非显式配置 `channels.qqbot.stt.asrFallback: true`，QQ 平台转写（`asr_refer_text`）在**所有**场景下都被丢弃——包括 STT 未配置的场景（旧行为是静默回退平台转写）。无任何转写来源时，语音消息渲染为 `[Voice message - transcription unavailable]` 占位文本（音频 URL 仍通过 `- Voice:` 行引用）。依赖平台转写的部署请显式加 `asrFallback: true`。
+- `asrFallback` 开关改为直接从原始配置读取，与 STT 凭证是否解析成功无关——仅写 `stt: { "asrFallback": true }` 即可恢复平台转写参与旧行为。
+
+### 修复
+
+- `src/adapter/media.ts` 在 ESM（tsx）下导入不再抛错：`createRequire` 锚点改为惰性解析（CJS 产物用 `__filename`，ESM 用 cwd）。
+
+---
+
 ## [2.0.1] - 2026-08-09
 
 ### 改进

@@ -639,6 +639,21 @@ STT 支持两级配置，按优先级查找：
 - `provider` — 引用 `models.providers` 中的 key，自动继承 `baseUrl` 和 `apiKey`
 - 设置 `enabled: false` 可禁用
 - 配置后，用户发来的语音消息会自动转换（SILK→WAV）并转录为文字
+- `asrFallback` — 平台转写（`asr_refer_text`）参与开关。**未显式设为 `true` 时，平台转写在所有场景下都被丢弃**：自有 STT 失败或返回空时不作兜底，STT 未配置时也不作为唯一来源（此时语音消息渲染为 `[Voice message - transcription unavailable]` 占位文本，音频 URL 仍通过 `- Voice:` 行引用）。该开关从 `channels.qqbot.stt.asrFallback` 读取，与 STT 凭证是否解析成功无关——仅写 `stt: { "asrFallback": true }` 即可恢复平台转写参与旧行为：
+
+```json
+{
+  "channels": {
+    "qqbot": {
+      "stt": {
+        "provider": "your-provider",
+        "model": "your-stt-model",
+        "asrFallback": true
+      }
+    }
+  }
+}
+```
 
 #### TTS（文字转语音）— 机器人发送语音消息
 
@@ -665,23 +680,6 @@ STT 支持两级配置，按优先级查找：
 - `voice` — 语音音色
 - 设置 `enabled: false` 可禁用（默认：`true`）
 - 配置后，AI 可生成并发送语音消息
-- `asrFallback` — 平台转写兜底开关（默认：`false`，严格模式）。配置了自有 STT 且成功转录后，QQ 自带的 `asr_refer_text` **不**作为兜底，也**不会**带进 AI 上下文（不会注入 `- ASR:` 行）。设为 `true` 时恢复旧行为：自有 STT 失败或返回空时退回平台转写
-
-**严格模式配置示例（推荐）：**
-
-```json
-{
-  "channels": {
-    "qqbot": {
-      "stt": {
-        "provider": "your-provider",
-        "model": "your-stt-model",
-        "asrFallback": false
-      }
-    }
-  }
-}
-```
 
 #### 正在输入指示器（typing）— 仅 C2C 私聊
 

@@ -11,7 +11,20 @@ import * as fs from 'node:fs';
 import * as crypto from 'node:crypto';
 import { getQQBotMediaDir } from '../utils/platform.js';
 
-const req = createRequire(__filename);
+let _req: NodeRequire | undefined;
+
+/**
+ * 惰性 require 工厂。
+ * CJS（tsup 产物）下用 __filename 锚定，与插件 node_modules 的解析路径一致；
+ * ESM（tsx 直跑测试）下 __filename 不存在，锚定 process.cwd()——
+ * 解析失败会落进 downloadRemoteMedia 的 catch，降级 fetch 直连。
+ */
+function getReq(): NodeRequire {
+  _req ??= createRequire(
+    typeof __filename !== 'undefined' ? __filename : path.join(process.cwd(), 'noop.js'),
+  );
+  return _req;
+}
 
 type SaveRemoteMedia = (opts: {
   url: string;
@@ -32,7 +45,7 @@ export function downloadRemoteMedia(opts: {
 }): Promise<{ path: string }> {
   if (_save === undefined) {
     try {
-      const mod = req('openclaw/plugin-sdk/media-runtime') as { saveRemoteMedia: SaveRemoteMedia };
+      const mod = getReq()('openclaw/plugin-sdk/media-runtime') as { saveRemoteMedia: SaveRemoteMedia };
       _save = mod.saveRemoteMedia;
     } catch {
       _save = null;

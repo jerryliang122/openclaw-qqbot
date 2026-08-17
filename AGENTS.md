@@ -1,6 +1,6 @@
 # AGENTS.md — openclaw-qqbot
 
-`@tencent-connect/openclaw-qqbot` — OpenClaw 通道插件，把 QQ Bot 官方 API 接入 OpenClaw framework。当前 v2.0.1。
+`@tencent-connect/openclaw-qqbot` — OpenClaw 通道插件，把 QQ Bot 官方 API 接入 OpenClaw framework。当前 v2.1.0。
 
 ## Commands
 

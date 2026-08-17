@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.1.0] - 2026-08-17
+
+### Changed
+
+- **`asrFallback` semantics tightened**: QQ's built-in platform transcript (`asr_refer_text`) is now discarded in **all** cases unless `channels.qqbot.stt.asrFallback` is explicitly set to `true` — including when STT is not configured at all. Previously, unconfigured STT silently fell back to the platform transcript. Voice messages without any transcript source now render as `[Voice message - transcription unavailable]` (the audio URL is still referenced via the `- Voice:` line).
+- The `asrFallback` flag is now read directly from the raw config, independent of whether STT credentials resolve — `stt: { "asrFallback": true }` alone restores the legacy platform-transcript behavior.
+
+### Fixed
+
+- `src/adapter/media.ts` no longer throws at import time under ESM (tsx): the `createRequire` anchor is now resolved lazily (`__filename` under CJS bundles, cwd under ESM).
+
+---
+
 ## [2.0.1] - 2026-08-09
 
 ### Improved

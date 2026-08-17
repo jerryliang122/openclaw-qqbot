@@ -643,6 +643,21 @@ STT supports two-level configuration with priority fallback:
 - `provider` — references a key in `models.providers` to inherit `baseUrl` and `apiKey`
 - Set `enabled: false` to disable
 - When configured, incoming voice messages are automatically converted (SILK→WAV) and transcribed
+- `asrFallback` — platform ASR (`asr_refer_text`) participation switch. Unless explicitly set to `true`, QQ's built-in platform transcript is **discarded in all cases**: not used as a fallback when your STT fails or returns empty, and not used as the sole source when STT is not configured at all (voice messages then render as `[Voice message - transcription unavailable]`; the audio URL is still referenced via the `- Voice:` line). The flag is read from `channels.qqbot.stt.asrFallback` regardless of whether STT credentials resolve — `stt: { "asrFallback": true }` alone restores the legacy platform-transcript behavior:
+
+```json
+{
+  "channels": {
+    "qqbot": {
+      "stt": {
+        "provider": "your-provider",
+        "model": "your-stt-model",
+        "asrFallback": true
+      }
+    }
+  }
+}
+```
 
 #### TTS (Text-to-Speech) — Send Voice Messages
 
@@ -669,23 +684,6 @@ STT supports two-level configuration with priority fallback:
 - `voice` — voice variant
 - Set `enabled: false` to disable (default: `true`)
 - When configured, AI can generate and send voice messages
-- `asrFallback` — platform ASR fallback switch (default: `false`, strict mode). When your own STT is configured and successfully runs, QQ's built-in `asr_refer_text` is **not** used as a fallback and is not carried into the AI context (no `- ASR:` line). Set `asrFallback: true` to restore the old behavior of falling back to the platform transcript when your STT returns empty or fails
-
-**Strict-mode example (recommended):**
-
-```json
-{
-  "channels": {
-    "qqbot": {
-      "stt": {
-        "provider": "your-provider",
-        "model": "your-stt-model",
-        "asrFallback": false
-      }
-    }
-  }
-}
-```
 
 #### Typing Indicator — C2C private chat only
 
