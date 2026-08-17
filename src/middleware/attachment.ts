@@ -35,6 +35,25 @@ export interface ProcessedAttachments {
   localMediaTypes: string[];
   /** 远端 URL 列表（下载失败时的回退） */
   remoteMediaUrls: string[];
+  /**
+   * 结构化媒体清单（全部附件，保持原始顺序）。
+   * 供 ctx-builder 组装 core 正规媒体通道的 media facts（MediaKind: image|audio|video|document）。
+   */
+  media: InboundMediaEntry[];
+}
+
+/**
+ * 单个入站媒体条目（对齐 core MediaKind/ChannelInboundMediaInput 语义）。
+ * localPath 与 remoteUrl 二选一可能都没有（下载失败且无 URL 时）。
+ */
+export interface InboundMediaEntry {
+  kind: 'image' | 'audio' | 'video' | 'document';
+  localPath?: string;
+  remoteUrl?: string;
+  contentType?: string;
+  filename?: string;
+  /** 仅语音：STT/平台 ASR 产出真实转写文本时为 true */
+  transcribed?: boolean;
 }
 
 interface AttachmentMiddlewareOptions {
@@ -86,6 +105,7 @@ async function processAttachments(
   const localMediaPaths: string[] = [];
   const localMediaTypes: string[] = [];
   const remoteMediaUrls: string[] = [];
+  const media: InboundMediaEntry[] = [];
 
   // 并行下载所有附件
   const tasks = attachments.map(async (att) => {
@@ -95,7 +115,7 @@ async function processAttachments(
 
     if (isImage && url) {
       const localPath = await downloadMediaFile(url, att.filename, log);
-      return { type: 'image' as const, localPath, url, contentType: att.content_type ?? 'image/png' };
+      return { type: 'image' as const, localPath, url, contentType: att.content_type ?? 'image/png', filename: att.filename };
     }
 
     if (isVoice) {
@@ -106,9 +126,9 @@ async function processAttachments(
     // other 类型也尝试下载
     if (url) {
       const localPath = await downloadMediaFile(url, att.filename, log);
-      return { type: 'other' as const, localPath, url, filename: att.filename ?? att.content_type };
+      return { type: 'other' as const, localPath, url, filename: att.filename ?? att.content_type, contentType: att.content_type };
     }
-    return { type: 'other' as const, localPath: null, url: '', filename: att.filename ?? att.content_type };
+    return { type: 'other' as const, localPath: null, url: '', filename: att.filename ?? att.content_type, contentType: att.content_type };
   });
 
   const results = await Promise.all(tasks);
@@ -124,6 +144,12 @@ async function processAttachments(
         imageUrls.push(result.url);
         remoteMediaUrls.push(result.url);
       }
+      media.push({
+        kind: 'image',
+        ...(result.localPath ? { localPath: result.localPath } : { remoteUrl: result.url }),
+        contentType: result.contentType,
+        filename: result.filename,
+      });
     } else if (result.type === 'voice') {
       transcripts.push(result.transcript);
       if (result.transcript.localPath) {
@@ -132,6 +158,16 @@ async function processAttachments(
       } else if (result.transcript.remoteUrl) {
         remoteMediaUrls.push(result.transcript.remoteUrl);
       }
+      media.push({
+        kind: 'audio',
+        ...(result.transcript.localPath
+          ? { localPath: result.transcript.localPath }
+          : result.transcript.remoteUrl
+            ? { remoteUrl: result.transcript.remoteUrl }
+            : {}),
+        contentType: 'audio/wav',
+        transcribed: result.transcript.source !== 'fallback',
+      });
     } else if (result.type === 'other') {
       if (result.localPath) {
         otherParts.push(`[Attachment: ${result.localPath}]`);
@@ -140,6 +176,12 @@ async function processAttachments(
       } else {
         otherParts.push(`[Attachment: ${result.filename}]`);
       }
+      media.push({
+        kind: kindFromContentType(result.contentType),
+        ...(result.localPath ? { localPath: result.localPath } : result.url ? { remoteUrl: result.url } : {}),
+        ...(result.contentType ? { contentType: result.contentType } : {}),
+        ...(result.filename ? { filename: result.filename } : {}),
+      });
     }
   }
 
@@ -151,7 +193,16 @@ async function processAttachments(
     localMediaPaths,
     localMediaTypes,
     remoteMediaUrls,
+    media,
   };
+}
+
+/** content_type → core MediaKind（无法识别时归为 document） */
+function kindFromContentType(contentType: string | undefined): InboundMediaEntry['kind'] {
+  if (contentType?.startsWith('video/')) return 'video';
+  if (contentType?.startsWith('image/')) return 'image';
+  if (contentType?.startsWith('audio/')) return 'audio';
+  return 'document';
 }
 
 // ── 语音处理 ──

@@ -30,10 +30,30 @@ export function buildCtxPayload(params: CtxPayloadParams): any {
   const groupId = convKind === 'group' ? envelope.groupId : undefined;
 
   const processed = ctx.state.processedAttachments as any;
-  const voicePaths = processed?.localMediaPaths?.filter((_: string, i: number) =>
-    processed.localMediaTypes?.[i]?.startsWith('audio/')) ?? [];
-  const voiceUrls = processed?.remoteMediaUrls?.filter((_: string, i: number) =>
-    processed.remoteMediaUrls?.[i]?.startsWith?.('audio/')) ?? [];
+
+  /**
+   * 正规媒体通道（对齐 core ChannelInboundMediaInput）：
+   * 全部附件（图片/语音/文件）按原始顺序作为 media facts 传入，
+   * 字段名必须是 path（不是 localPath）；url 用本地路径（QQ CDN URL 有时效），
+   * 与 telegram toInboundMedia 的 { path, url: path, contentType, kind, transcribed } 一致。
+   * media facts 经 core 归一化后生成 MediaPath/MediaPaths/MediaTypes/MediaTranscribedIndexes。
+   */
+  const mediaFacts = (processed?.media as Array<{
+    kind: 'image' | 'audio' | 'video' | 'document';
+    localPath?: string;
+    remoteUrl?: string;
+    contentType?: string;
+    transcribed?: boolean;
+  }> | undefined)?.map((m) => ({
+    kind: m.kind,
+    ...(m.localPath
+      ? { path: m.localPath, url: m.localPath }
+      : m.remoteUrl
+        ? { url: m.remoteUrl }
+        : {}),
+    ...(m.contentType ? { contentType: m.contentType } : {}),
+    ...(m.transcribed ? { transcribed: true } : {}),
+  })) ?? [];
 
   const msgTimestamp = (msg as any).timestamp ?? (msg as any).Timestamp;
 
@@ -73,15 +93,7 @@ export function buildCtxPayload(params: CtxPayloadParams): any {
     command: isSlashCommand
       ? { kind: 'text-slash' as const, body: assembled.rawBody!, authorized: true }
       : undefined,
-    media: voicePaths.length > 0
-      ? voicePaths.map((p: string, i: number) => ({
-          contentType: processed?.localMediaTypes?.[i] ?? 'audio/silk',
-          localPath: p,
-          url: voiceUrls[i],
-        }))
-      : voiceUrls.length > 0
-        ? voiceUrls.map((u: string) => ({ contentType: 'audio/wav', url: u }))
-        : undefined,
+    media: mediaFacts.length > 0 ? mediaFacts : undefined,
     supplemental: {
       quote: envelope.quote
         ? { id: envelope.messageId, body: envelope.quote.content, sender: envelope.quote.senderId }
