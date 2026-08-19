@@ -7,7 +7,7 @@
  */
 
 import type { TypingParams, TypingState } from './types-plugin.js';
-import { checkPassiveReplyQuota, inferQQBotScope } from './features/quota-manager.js';
+import { checkPassiveReplyQuota, consumePassiveReplyQuota, inferQQBotScope } from './features/quota-manager.js';
 
 const activeTypingSessions = new Map<string, TypingState>();
 
@@ -17,7 +17,7 @@ const MAX_RENEWALS = 10;
 
 export async function startTypingWithRenewal(
   params: TypingParams & {
-    sendTyping: () => Promise<boolean>;
+    sendTyping: (params: { to: string; msgId?: string }) => Promise<boolean>;
   },
 ): Promise<void> {
   const { accountId, to, replyToId, log, sendTyping } = params;
@@ -45,15 +45,20 @@ export async function startTypingWithRenewal(
     scope: 'c2c',
   });
 
+  const msgIdToSend = canPassiveReply ? replyToId : undefined;
+
   if (!canPassiveReply) {
-    log?.debug?.(`[${accountId}] typing start failed: quota exhausted`);
-    return;
+    log?.debug?.(`[${accountId}] typing falling back to proactive mode: quota exhausted`);
   }
 
-  const sent = await sendTyping();
+  const sent = await sendTyping({ to, msgId: msgIdToSend });
   if (!sent) {
     log?.debug?.(`[${accountId}] typing start failed: send failed`);
     return;
+  }
+
+  if (canPassiveReply) {
+    await consumePassiveReplyQuota({ accountId, msgId: replyToId, scope: 'c2c', log });
   }
 
   log?.debug?.(`[${accountId}] typing started: ${sessionKey}`);
@@ -79,10 +84,10 @@ export async function startTypingWithRenewal(
 async function handleTypingRenewal(
   params: TypingParams & {
     sessionKey: string;
-    sendTyping: () => Promise<boolean>;
+    sendTyping: (params: { to: string; msgId?: string }) => Promise<boolean>;
   },
 ): Promise<void> {
-  const { sessionKey, accountId, replyToId, log, sendTyping } = params;
+  const { sessionKey, accountId, to, replyToId, log, sendTyping } = params;
 
   const state = activeTypingSessions.get(sessionKey);
   if (!state) {
@@ -101,17 +106,21 @@ async function handleTypingRenewal(
     scope: 'c2c',
   });
 
+  const msgIdToSend = canPassiveReply ? replyToId : undefined;
+
   if (!canPassiveReply) {
-    log?.debug?.(`[${accountId}] typing renewal failed: quota exhausted`);
-    activeTypingSessions.delete(sessionKey);
-    return;
+    log?.debug?.(`[${accountId}] typing renewal falling back to proactive mode: quota exhausted`);
   }
 
-  const renewed = await sendTyping();
+  const renewed = await sendTyping({ to, msgId: msgIdToSend });
   if (!renewed) {
     log?.debug?.(`[${accountId}] typing renewal failed: send failed`);
     activeTypingSessions.delete(sessionKey);
     return;
+  }
+
+  if (canPassiveReply) {
+    await consumePassiveReplyQuota({ accountId, msgId: replyToId, scope: 'c2c', log });
   }
 
   state.renewalCount += 1;
