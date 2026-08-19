@@ -67,3 +67,4 @@ export {
 } from './src/outbound/streaming-controller.js';
 export * from './src/types.js';
 export * from './src/config.js';
+export { qqbotChannelOutbound } from './src/outbound-adapter.js';
