@@ -2,6 +2,7 @@
  * Integration test for qqbotPlugin
  * 
  * Verifies that the plugin has all required adapters
+ * Note: createChatChannelPlugin spreads 'base' properties to top level
  */
 
 import assert from 'node:assert';
@@ -23,107 +24,115 @@ test('qqbotPlugin is defined', () => {
   assert.ok(qqbotPlugin, 'qqbotPlugin should be defined');
 });
 
-test('qqbotPlugin has base property', () => {
-  assert.ok(qqbotPlugin.base, 'qqbotPlugin should have base property');
+test('qqbotPlugin has id', () => {
+  assert.strictEqual(qqbotPlugin.id, 'qqbot', 'qqbotPlugin.id should be qqbot');
 });
 
-const base = qqbotPlugin.base;
-
-test('base has config adapter', () => {
-  assert.ok(base.config, 'base should have config adapter');
-  assert.ok(typeof base.config.listAccountIds === 'function', 'config should have listAccountIds');
-  assert.ok(typeof base.config.resolveAccount === 'function', 'config should have resolveAccount');
-  assert.ok(typeof base.config.defaultAccountId === 'function', 'config should have defaultAccountId');
-  assert.ok(typeof base.config.isConfigured === 'function', 'config should have isConfigured');
-  assert.ok(typeof base.config.describeAccount === 'function', 'config should have describeAccount');
-  assert.ok(typeof base.config.setAccountEnabled === 'function', 'config should have setAccountEnabled');
-  assert.ok(typeof base.config.deleteAccount === 'function', 'config should have deleteAccount');
+test('qqbotPlugin has meta', () => {
+  assert.ok(qqbotPlugin.meta, 'qqbotPlugin should have meta');
+  assert.strictEqual(qqbotPlugin.meta.label, 'QQ Bot', 'meta.label should be QQ Bot');
 });
 
-test('base has message adapter', () => {
-  assert.ok(base.message, 'base should have message adapter');
+test('qqbotPlugin has capabilities', () => {
+  assert.ok(qqbotPlugin.capabilities, 'qqbotPlugin should have capabilities');
+  assert.ok(qqbotPlugin.capabilities.chatTypes, 'capabilities should have chatTypes');
 });
 
-test('base has messaging adapter', () => {
-  assert.ok(base.messaging, 'base should have messaging adapter');
+test('qqbotPlugin has config adapter', () => {
+  assert.ok(qqbotPlugin.config, 'qqbotPlugin should have config adapter');
+  assert.ok(typeof qqbotPlugin.config.listAccountIds === 'function', 'config should have listAccountIds');
+  assert.ok(typeof qqbotPlugin.config.resolveAccount === 'function', 'config should have resolveAccount');
+  assert.ok(typeof qqbotPlugin.config.defaultAccountId === 'function', 'config should have defaultAccountId');
+  assert.ok(typeof qqbotPlugin.config.isConfigured === 'function', 'config should have isConfigured');
+  assert.ok(typeof qqbotPlugin.config.describeAccount === 'function', 'config should have describeAccount');
+  assert.ok(typeof qqbotPlugin.config.setAccountEnabled === 'function', 'config should have setAccountEnabled');
+  assert.ok(typeof qqbotPlugin.config.deleteAccount === 'function', 'config should have deleteAccount');
 });
 
-test('base has status adapter', () => {
-  assert.ok(base.status, 'base should have status adapter');
+test('qqbotPlugin has message adapter', () => {
+  assert.ok(qqbotPlugin.message, 'qqbotPlugin should have message adapter');
 });
 
-test('base has gateway adapter', () => {
-  assert.ok(base.gateway, 'base should have gateway adapter');
+test('qqbotPlugin has messaging adapter', () => {
+  assert.ok(qqbotPlugin.messaging, 'qqbotPlugin should have messaging adapter');
 });
 
-test('base has outbound adapter', () => {
-  assert.ok(base.outbound, 'base should have outbound adapter');
-  assert.ok(typeof base.outbound.sendTextWithQuota === 'function', 'outbound should have sendTextWithQuota');
-  assert.ok(typeof base.outbound.sendMediaWithQuota === 'function', 'outbound should have sendMediaWithQuota');
-  assert.ok(typeof base.outbound.canSendTyping === 'function', 'outbound should have canSendTyping');
+test('qqbotPlugin has status adapter', () => {
+  assert.ok(qqbotPlugin.status, 'qqbotPlugin should have status adapter');
 });
 
-test('base has agentPrompt adapter', () => {
-  assert.ok(base.agentPrompt, 'base should have agentPrompt adapter');
+test('qqbotPlugin has gateway adapter', () => {
+  assert.ok(qqbotPlugin.gateway, 'qqbotPlugin should have gateway adapter');
 });
 
-test('base has heartbeat adapter', () => {
-  assert.ok(base.heartbeat, 'base should have heartbeat adapter');
+test('qqbotPlugin has outbound adapter', () => {
+  assert.ok(qqbotPlugin.outbound, 'qqbotPlugin should have outbound adapter');
+  assert.ok(typeof qqbotPlugin.outbound.sendTextWithQuota === 'function', 'outbound should have sendTextWithQuota');
+  assert.ok(typeof qqbotPlugin.outbound.sendMediaWithQuota === 'function', 'outbound should have sendMediaWithQuota');
+  assert.ok(typeof qqbotPlugin.outbound.canSendTyping === 'function', 'outbound should have canSendTyping');
 });
 
-test('base has threading adapter', () => {
-  assert.ok(base.threading, 'base should have threading adapter');
+test('qqbotPlugin has agentPrompt adapter', () => {
+  assert.ok(qqbotPlugin.agentPrompt, 'qqbotPlugin should have agentPrompt adapter');
 });
 
-test('base has groups adapter', () => {
-  assert.ok(base.groups, 'base should have groups adapter');
-  assert.ok(typeof base.groups.resolveRequireMention === 'function', 'groups should have resolveRequireMention');
-  assert.ok(typeof base.groups.resolveToolPolicy === 'function', 'groups should have resolveToolPolicy');
+test('qqbotPlugin has heartbeat adapter', () => {
+  assert.ok(qqbotPlugin.heartbeat, 'qqbotPlugin should have heartbeat adapter');
 });
 
-test('base has mentions adapter', () => {
-  assert.ok(base.mentions, 'base should have mentions adapter');
-  assert.ok(typeof base.mentions.stripMentions === 'function', 'mentions should have stripMentions');
+test('qqbotPlugin has threading adapter', () => {
+  assert.ok(qqbotPlugin.threading, 'qqbotPlugin should have threading adapter');
 });
 
-test('base has setup adapter', () => {
-  assert.ok(base.setup, 'base should have setup adapter');
-  assert.ok(typeof base.setup.resolveAccountId === 'function', 'setup should have resolveAccountId');
-  assert.ok(typeof base.setup.applyAccountName === 'function', 'setup should have applyAccountName');
-  assert.ok(typeof base.setup.validateInput === 'function', 'setup should have validateInput');
-  assert.ok(typeof base.setup.applyAccountConfig === 'function', 'setup should have applyAccountConfig');
+test('qqbotPlugin has groups adapter', () => {
+  assert.ok(qqbotPlugin.groups, 'qqbotPlugin should have groups adapter');
+  assert.ok(typeof qqbotPlugin.groups.resolveRequireMention === 'function', 'groups should have resolveRequireMention');
+  assert.ok(typeof qqbotPlugin.groups.resolveToolPolicy === 'function', 'groups should have resolveToolPolicy');
 });
 
-test('base has setupWizard', () => {
-  assert.ok(base.setupWizard, 'base should have setupWizard');
+test('qqbotPlugin has mentions adapter', () => {
+  assert.ok(qqbotPlugin.mentions, 'qqbotPlugin should have mentions adapter');
+  assert.ok(typeof qqbotPlugin.mentions.stripMentions === 'function', 'mentions should have stripMentions');
 });
 
-test('base has auth adapter', () => {
-  assert.ok(base.auth, 'base should have auth adapter');
-  assert.ok(base.auth.login, 'auth should have login');
+test('qqbotPlugin has setup adapter', () => {
+  assert.ok(qqbotPlugin.setup, 'qqbotPlugin should have setup adapter');
+  assert.ok(typeof qqbotPlugin.setup.resolveAccountId === 'function', 'setup should have resolveAccountId');
+  assert.ok(typeof qqbotPlugin.setup.applyAccountName === 'function', 'setup should have applyAccountName');
+  assert.ok(typeof qqbotPlugin.setup.validateInput === 'function', 'setup should have validateInput');
+  assert.ok(typeof qqbotPlugin.setup.applyAccountConfig === 'function', 'setup should have applyAccountConfig');
 });
 
-test('base has onboarding adapter', () => {
-  assert.ok(base.onboarding, 'base should have onboarding adapter');
+test('qqbotPlugin has setupWizard', () => {
+  assert.ok(qqbotPlugin.setupWizard, 'qqbotPlugin should have setupWizard');
+});
+
+test('qqbotPlugin has auth adapter', () => {
+  assert.ok(qqbotPlugin.auth, 'qqbotPlugin should have auth adapter');
+  assert.ok(qqbotPlugin.auth.login, 'auth should have login');
+});
+
+test('qqbotPlugin has onboarding adapter', () => {
+  assert.ok(qqbotPlugin.onboarding, 'qqbotPlugin should have onboarding adapter');
 });
 
 test('outbound adapter has deliveryMode', () => {
-  assert.ok(base.outbound.deliveryMode, 'outbound should have deliveryMode');
-  assert.strictEqual(base.outbound.deliveryMode, 'direct', 'deliveryMode should be direct');
+  assert.ok(qqbotPlugin.outbound.deliveryMode, 'outbound should have deliveryMode');
+  assert.strictEqual(qqbotPlugin.outbound.deliveryMode, 'direct', 'deliveryMode should be direct');
 });
 
 test('outbound adapter has shouldSuppressLocalPayloadPrompt', () => {
-  assert.ok(typeof base.outbound.shouldSuppressLocalPayloadPrompt === 'function', 
+  assert.ok(typeof qqbotPlugin.outbound.shouldSuppressLocalPayloadPrompt === 'function', 
     'outbound should have shouldSuppressLocalPayloadPrompt');
 });
 
 test('outbound adapter has shouldTreatDeliveredTextAsVisible', () => {
-  assert.ok(typeof base.outbound.shouldTreatDeliveredTextAsVisible === 'function', 
+  assert.ok(typeof qqbotPlugin.outbound.shouldTreatDeliveredTextAsVisible === 'function', 
     'outbound should have shouldTreatDeliveredTextAsVisible');
 });
 
 test('outbound adapter has preferFinalAssistantVisibleText', () => {
-  assert.ok(typeof base.outbound.preferFinalAssistantVisibleText === 'boolean', 
+  assert.ok(typeof qqbotPlugin.outbound.preferFinalAssistantVisibleText === 'boolean', 
     'outbound should have preferFinalAssistantVisibleText');
 });
 
