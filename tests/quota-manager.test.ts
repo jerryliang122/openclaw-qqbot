@@ -4,6 +4,7 @@ import {
   consumePassiveReplyQuota,
   inferQQBotScope,
   clearQuotaCache,
+  __test_getQuotaCache,
 } from '../src/features/quota-manager.js';
 
 function test(name: string, fn: () => Promise<void> | void) {
@@ -74,6 +75,32 @@ await test('checkPassiveReplyQuota: 无 msgId 时返回 false', async () => {
     scope: 'c2c',
   });
   assert(canReply === false);
+});
+
+await test('checkPassiveReplyQuota: 过期配额返回 false', async () => {
+  clearQuotaCache();
+  const accountId = 'test-account-expired';
+  const msgId = 'test-msg-expired';
+  
+  await consumePassiveReplyQuota({
+    accountId,
+    msgId,
+    scope: 'c2c',
+  });
+  
+  const stats = { accountId, msgId, scope: 'c2c' as const };
+  const canReplyBefore = await checkPassiveReplyQuota(stats);
+  assert(canReplyBefore === true, 'Active quota should allow reply');
+  
+  const quotaCache = __test_getQuotaCache();
+  const key = `${accountId}:c2c:${msgId}`;
+  const cached = quotaCache.get(key);
+  if (cached) {
+    cached.expiresAt = Date.now() - 1;
+  }
+  
+  const canReplyAfter = await checkPassiveReplyQuota(stats);
+  assert(canReplyAfter === false, 'Expired quota should NOT allow passive reply');
 });
 
 console.log('All quota manager tests passed');
