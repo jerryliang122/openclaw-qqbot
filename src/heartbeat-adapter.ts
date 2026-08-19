@@ -6,6 +6,8 @@
 
 import { startTypingWithRenewal, stopTyping } from './typing-lifecycle.js';
 import { inferQQBotScope } from './features/quota-manager.js';
+import { getGateway } from './outbound/outbound-service.js';
+import { parseTarget } from './outbound/target.js';
 
 /**
  * QQBot Heartbeat Adapter
@@ -33,8 +35,18 @@ export const qqbotHeartbeatAdapter = {
       accountId,
       to,
       replyToId,
-      sendTyping: async () => {
-        return true;
+      sendTyping: async ({ to, msgId }) => {
+        const gw = getGateway(accountId);
+        if (!gw) return false;
+
+        const target = parseTarget(to);
+        const targetWithMsgId = msgId ? { ...target, msgId } : target;
+        try {
+          await gw.sendTyping(targetWithMsgId);
+          return true;
+        } catch {
+          return false;
+        }
       },
     });
   },
