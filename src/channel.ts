@@ -7,6 +7,11 @@
 import { createChatChannelPlugin } from 'openclaw/plugin-sdk/channel-core';
 import { DEFAULT_ACCOUNT_ID } from 'openclaw/plugin-sdk/account-id';
 import type { OpenClawConfig } from 'openclaw/plugin-sdk/config-contracts';
+import {
+  setAccountEnabledInConfigSection,
+  deleteAccountFromConfigSection,
+  applyAccountNameToChannelSection,
+} from 'openclaw/plugin-sdk/core';
 
 import type { ResolvedQQBotAccount } from './types.js';
 import {
@@ -16,7 +21,12 @@ import {
   resolveRequireMention,
   resolveToolPolicy,
   resolveGroupConfig,
+  applyQQBotAccountConfig,
 } from './config.js';
+import { loadCredentialBackup } from './features/credential-backup.js';
+import { qqbotSetupWizard } from './setup/surface.js';
+import { qqbotLogin } from './setup/login.js';
+import { qqbotOnboardingAdapter } from './features/onboarding.js';
 import { createQQBotPluginBase } from './plugin-base.js';
 import { qqbotMessageAdapter } from './message-adapter.js';
 import { qqbotMessagingAdapter } from './messaging-adapter.js';
@@ -76,6 +86,47 @@ const qqbotMentionsAdapter = {
 };
 
 /**
+ * QQBot Setup Adapter
+ */
+const qqbotSetupAdapter = {
+  resolveAccountId: ({ accountId }: { cfg: OpenClawConfig; accountId?: string }) =>
+    accountId?.trim().toLowerCase() || DEFAULT_ACCOUNT_ID,
+  applyAccountName: ({ cfg, accountId, name }: {
+    cfg: OpenClawConfig;
+    accountId: string;
+    name?: string;
+  }) =>
+    applyAccountNameToChannelSection({ cfg, channelKey: 'qqbot', accountId, name }),
+  validateInput: ({ input }: {
+    cfg: OpenClawConfig;
+    accountId: string;
+    input: { token?: string; tokenFile?: string; useEnv?: boolean };
+  }) => {
+    if (!input.token && !input.tokenFile && !input.useEnv) {
+      return 'QQBot requires --token (format: appId:clientSecret) or --use-env';
+    }
+    return null;
+  },
+  applyAccountConfig: ({ cfg, accountId, input }: {
+    cfg: OpenClawConfig;
+    accountId: string;
+    input: { token?: string; tokenFile?: string; name?: string; useEnv?: boolean };
+  }) => {
+    let appId = '';
+    let clientSecret = '';
+    if (input.token) {
+      const parts = input.token.split(':');
+      if (parts.length === 2) { appId = parts[0]; clientSecret = parts[1]; }
+    }
+    return applyQQBotAccountConfig(cfg, accountId, {
+      appId, clientSecret,
+      clientSecretFile: input.tokenFile,
+      name: input.name,
+    }) as OpenClawConfig;
+  },
+};
+
+/**
  * QQBot Config Adapter
  */
 const qqbotConfigAdapter = {
@@ -83,16 +134,39 @@ const qqbotConfigAdapter = {
   resolveAccount: (cfg: OpenClawConfig, accountId?: string | null) =>
     resolveQQBotAccount(cfg, accountId),
   defaultAccountId: (cfg: OpenClawConfig) => resolveDefaultQQBotAccountId(cfg),
-  isConfigured: (account?: ResolvedQQBotAccount) => {
-    return Boolean(account?.appId && account?.clientSecret);
+  isConfigured: (account: ResolvedQQBotAccount, _cfg: OpenClawConfig) => {
+    if (account?.appId && account?.clientSecret) return true;
+    return loadCredentialBackup(account?.accountId) !== null;
   },
-  describeAccount: (account?: ResolvedQQBotAccount) => ({
+  describeAccount: (account: ResolvedQQBotAccount, _cfg: OpenClawConfig) => ({
     accountId: account?.accountId ?? DEFAULT_ACCOUNT_ID,
     name: account?.name,
     enabled: account?.enabled ?? false,
     configured: Boolean(account?.appId && account?.clientSecret),
     tokenSource: account?.secretSource,
   }),
+  setAccountEnabled: ({ cfg, accountId, enabled }: {
+    cfg: OpenClawConfig;
+    accountId: string;
+    enabled: boolean;
+  }) =>
+    setAccountEnabledInConfigSection({
+      cfg, sectionKey: 'qqbot', accountId, enabled, allowTopLevel: true
+    }),
+  deleteAccount: ({ cfg, accountId }: { cfg: OpenClawConfig; accountId: string }) =>
+    deleteAccountFromConfigSection({
+      cfg, sectionKey: 'qqbot', accountId,
+      clearBaseFields: ['appId', 'clientSecret', 'clientSecretFile', 'name'],
+    }),
+  resolveAllowFrom: ({ cfg, accountId }: { cfg: OpenClawConfig; accountId?: string | null }) => {
+    const account = resolveQQBotAccount(cfg, accountId ?? undefined);
+    return (account.config?.allowFrom ?? []).map((e: string | number) => String(e)) as (string | number)[];
+  },
+  formatAllowFrom: ({ cfg, allowFrom }: { cfg: OpenClawConfig; allowFrom: (string | number)[] }) =>
+    allowFrom
+      .map((e: string | number) => String(e).trim())
+      .filter(Boolean)
+      .map((e: string) => e.replace(/^qqbot:/i, '').toUpperCase()),
 };
 
 /**
@@ -115,6 +189,12 @@ export const qqbotPlugin = createChatChannelPlugin({
     threading: qqbotThreadingAdapter,
     groups: qqbotGroupsAdapter,
     mentions: qqbotMentionsAdapter,
+
+    setup: qqbotSetupAdapter,
+    setupWizard: qqbotSetupWizard as any,
+    auth: { login: qqbotLogin as any },
+    // @ts-ignore onboarding 兼容
+    onboarding: qqbotOnboardingAdapter,
 
     approvalCapability: getQQBotApprovalCapability(),
   },

@@ -13,14 +13,7 @@ declare module "openclaw/plugin-sdk" {
    */
   export interface OpenClawConfig {
     /** 频道配置 */
-    channels?: {
-      qqbot?: unknown;
-      telegram?: unknown;
-      discord?: unknown;
-      slack?: unknown;
-      whatsapp?: unknown;
-      [key: string]: unknown;
-    };
+    channels?: any;
     /** 其他配置字段 */
     [key: string]: unknown;
   }
@@ -562,7 +555,7 @@ declare module "openclaw/plugin-sdk" {
     cfg: OpenClawConfig;
     channelKey: string;
     accountId: string;
-    name: string;
+    name?: string;
   }): OpenClawConfig;
 
   /**
