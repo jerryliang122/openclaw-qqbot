@@ -51,7 +51,7 @@ export interface QQBotOutboundAdapter {
     replyToId?: string;
     log?: PluginLogger;
   }) => Promise<{ messageId?: string; error?: string }>;
-  sendTypingWithQuota: (params: {
+  canSendTyping: (params: {
     to: string;
     accountId: string;
     replyToId: string;
@@ -160,7 +160,7 @@ export function createQQBotOutboundAdapter(params: QQBotOutboundAdapterParams): 
       return result;
     },
 
-    sendTypingWithQuota: async ({ to, accountId, replyToId, log }) => {
+    canSendTyping: async ({ to, accountId, replyToId, log }) => {
       const scope = inferQQBotScope(to);
 
       if (scope !== 'c2c' || !replyToId) {
@@ -185,3 +185,9 @@ export function createQQBotOutboundAdapter(params: QQBotOutboundAdapterParams): 
     preferFinalAssistantVisibleText,
   };
 }
+
+export const qqbotChannelOutbound = createQQBotOutboundAdapter({
+  shouldSuppressLocalPayloadPrompt: () => false,
+  shouldTreatDeliveredTextAsVisible: () => true,
+  preferFinalAssistantVisibleText: true,
+});
