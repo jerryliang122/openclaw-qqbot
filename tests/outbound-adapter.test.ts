@@ -31,7 +31,7 @@ async function main() {
     assert(adapter !== undefined);
     assert(typeof adapter.sendTextWithQuota === 'function');
     assert(typeof adapter.sendMediaWithQuota === 'function');
-    assert(typeof adapter.sendTypingWithQuota === 'function');
+    assert(typeof adapter.canSendTyping === 'function');
   });
 
   await test('shouldSuppressLocalPayloadPrompt: 审批 payload 抑制', () => {
