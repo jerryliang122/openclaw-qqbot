@@ -5,10 +5,11 @@
  * 旧版本不可用时 fallback 到 QQ Bot media 目录。
  */
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { getQQBotMediaDir } from '../utils/platform.js';
 
 // CJS 下 __filename 是 dist/index.cjs 的绝对路径，行为等价于 import.meta.url
-const req = createRequire(__filename);
+const req = createRequire(fileURLToPath(import.meta.url));
 
 let health: {
   resolveAgentWorkspaceDir: (cfg: any, agentId: string) => string;
