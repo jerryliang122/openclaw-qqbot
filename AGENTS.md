@@ -43,7 +43,7 @@ src/
   openclaw-plugin-sdk.d.ts  # local type stubs for openclaw/plugin-sdk
 ```
 
-Plugin exports include `qqbotPlugin`, `getBotForAccount`, `QQBotGateway`, `sendText`, `sendMedia`, `parseTarget`, `dispatchToOpenClaw`, `StreamingController`, `PersistedRefIndexStore`.
+Plugin exports include `qqbotPlugin`, `getBotForAccount`, `QQBotGateway`, `sendText`, `sendMedia`, `parseTarget`, `dispatchToOpenClaw`, `StreamingController`, `PersistedRefIndexStore`, `ReplyLimiter`, quota management functions, and typing lifecycle functions.
 
 ## Key gotchas
 
@@ -55,6 +55,8 @@ Plugin exports include `qqbotPlugin`, `getBotForAccount`, `QQBotGateway`, `sendT
 - **Group message priority chain**: `groups.{groupOpenid}.requireMention` → `groups.*.requireMention` → account-level `defaultRequireMention` → `true` (default). Same precedence applies to other group config fields.
 - **No secrets in repo code**: appid/secret is configured via `openclaw channels add --token "appid:secret"` or env vars `QQBOT_APPID` / `QQBOT_SECRET`. Never hardcode or log credentials.
 - **`package-lock.json` is gitignored** — use `npm install` (regenerates it) rather than `npm ci` against a fresh clone.
+- **Quota management**: QQ Bot enforces passive reply limits (C2C: 4 replies/msg_id within 60min; Group: 5 replies/msg_id within 5min). The plugin automatically falls back to proactive messaging when quota is exhausted. Use `ReplyLimiter` (src/outbound/reply-limiter.ts) for custom quota handling. See `checkPassiveReplyQuota()` and `consumePassiveReplyQuota()` in src/features/quota-manager.ts.
+- **Typing renewal**: C2C typing indicator (`sendTyping`) automatically renews every 20s minimum (QPS constraint). When quota is exhausted, typing falls back to proactive mode (without msg_id). Typing also auto-renews after outbound messages (5s delay) to maintain the indicator during streaming/chain-of-thought. See `c2cTypingIndicator` middleware and `POST_MESSAGE_REFRESH_DELAY_MS` constant.
 
 ## Skills (under `/skills/`)
 
