@@ -186,8 +186,11 @@ export function createQQBotOutboundAdapter(params: QQBotOutboundAdapterParams): 
   };
 }
 
-export const qqbotChannelOutbound = createQQBotOutboundAdapter({
-  shouldSuppressLocalPayloadPrompt: () => false,
-  shouldTreatDeliveredTextAsVisible: () => true,
-  preferFinalAssistantVisibleText: true,
-});
+export const qqbotChannelOutbound = {
+  ...createQQBotOutboundAdapter({
+    shouldSuppressLocalPayloadPrompt: () => false,
+    shouldTreatDeliveredTextAsVisible: () => true,
+    preferFinalAssistantVisibleText: true,
+  }),
+  deliveryMode: 'direct' as const,
+};

@@ -24,12 +24,12 @@ export function createQQBotPluginBase(params: QQBotPluginBaseParams = {}) {
       order: 50,
     },
     capabilities: {
-      chatTypes: ['direct', 'group'] as const,
+      chatTypes: ['direct', 'group'] as Array<'direct' | 'group'>,
       media: true,
       reactions: false,
       threads: false,
     },
-    setupWizard,
+    setupWizard: setupWizard as any,
     reload: {
       configPrefixes: ['channels.qqbot'],
     },
