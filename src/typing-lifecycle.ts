@@ -1,0 +1,160 @@
+/**
+ * QQBot Typing 续期管理
+ *
+ * 显示时长：60 秒
+ * 续期时机：50 秒后
+ * 最大续期：10 次（约 10 分钟）
+ */
+
+import type { TypingParams, TypingState } from './types-plugin.js';
+import { checkPassiveReplyQuota, inferQQBotScope } from './features/quota-manager.js';
+
+const activeTypingSessions = new Map<string, TypingState>();
+
+const TYPING_DURATION_MS = 60 * 1000;
+const TYPING_RENEWAL_MS = 50 * 1000;
+const MAX_RENEWALS = 10;
+
+export async function startTypingWithRenewal(
+  params: TypingParams & {
+    sendTyping: () => Promise<boolean>;
+  },
+): Promise<void> {
+  const { accountId, to, replyToId, log, sendTyping } = params;
+  const sessionKey = `${accountId}:${to}:${replyToId}`;
+
+  if (activeTypingSessions.has(sessionKey)) {
+    return;
+  }
+
+  const scope = inferQQBotScope(to);
+
+  if (scope !== 'c2c') {
+    log?.debug?.(`[${accountId}] typing not supported for scope: ${scope}`);
+    return;
+  }
+
+  if (!replyToId) {
+    log?.debug?.(`[${accountId}] typing requires replyToId`);
+    return;
+  }
+
+  const canPassiveReply = await checkPassiveReplyQuota({
+    accountId,
+    msgId: replyToId,
+    scope: 'c2c',
+  });
+
+  if (!canPassiveReply) {
+    log?.debug?.(`[${accountId}] typing start failed: quota exhausted`);
+    return;
+  }
+
+  const sent = await sendTyping();
+  if (!sent) {
+    log?.debug?.(`[${accountId}] typing start failed: send failed`);
+    return;
+  }
+
+  log?.debug?.(`[${accountId}] typing started: ${sessionKey}`);
+
+  const timer = setTimeout(async () => {
+    await handleTypingRenewal({
+      sessionKey,
+      accountId,
+      to,
+      replyToId,
+      log,
+      sendTyping,
+    });
+  }, TYPING_RENEWAL_MS);
+
+  activeTypingSessions.set(sessionKey, {
+    timer,
+    startedAt: Date.now(),
+    renewalCount: 0,
+  });
+}
+
+async function handleTypingRenewal(
+  params: TypingParams & {
+    sessionKey: string;
+    sendTyping: () => Promise<boolean>;
+  },
+): Promise<void> {
+  const { sessionKey, accountId, replyToId, log, sendTyping } = params;
+
+  const state = activeTypingSessions.get(sessionKey);
+  if (!state) {
+    return;
+  }
+
+  if (state.renewalCount >= MAX_RENEWALS) {
+    log?.debug?.(`[${accountId}] typing stopped: max renewals reached`);
+    activeTypingSessions.delete(sessionKey);
+    return;
+  }
+
+  const canPassiveReply = await checkPassiveReplyQuota({
+    accountId,
+    msgId: replyToId,
+    scope: 'c2c',
+  });
+
+  if (!canPassiveReply) {
+    log?.debug?.(`[${accountId}] typing renewal failed: quota exhausted`);
+    activeTypingSessions.delete(sessionKey);
+    return;
+  }
+
+  const renewed = await sendTyping();
+  if (!renewed) {
+    log?.debug?.(`[${accountId}] typing renewal failed: send failed`);
+    activeTypingSessions.delete(sessionKey);
+    return;
+  }
+
+  state.renewalCount += 1;
+  log?.debug?.(`[${accountId}] typing renewed #${state.renewalCount}: ${sessionKey}`);
+
+  state.timer = setTimeout(async () => {
+    await handleTypingRenewal(params);
+  }, TYPING_RENEWAL_MS);
+
+  activeTypingSessions.set(sessionKey, state);
+}
+
+export function stopTyping(params: {
+  accountId: string;
+  to: string;
+  replyToId: string;
+  log?: {
+    debug?: (message: string) => void;
+  };
+}): void {
+  const { accountId, to, replyToId, log } = params;
+  const sessionKey = `${accountId}:${to}:${replyToId}`;
+
+  const state = activeTypingSessions.get(sessionKey);
+  if (state) {
+    clearTimeout(state.timer);
+    activeTypingSessions.delete(sessionKey);
+    log?.debug?.(`[${accountId}] typing stopped: ${sessionKey}`);
+  }
+}
+
+export function cleanupAllTyping(): void {
+  for (const [, state] of activeTypingSessions.entries()) {
+    clearTimeout(state.timer);
+  }
+  activeTypingSessions.clear();
+}
+
+export function isTypingActive(accountId: string, replyToId: string): boolean {
+  for (const [key] of activeTypingSessions.entries()) {
+    if (key.startsWith(`${accountId}:`) && key.endsWith(`:${replyToId}`)) {
+      return true;
+    }
+  }
+  return false;
+}
