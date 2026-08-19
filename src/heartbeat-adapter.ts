@@ -16,8 +16,8 @@ export const qqbotHeartbeatAdapter = {
   sendTyping: async (params: {
     cfg: any;
     to: string;
-    accountId?: string;
-    threadId?: string | number;
+    accountId?: string | null;
+    threadId?: string | number | null;
     replyToId?: string;
   }) => {
     const { to, accountId, replyToId } = params;

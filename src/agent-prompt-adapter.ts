@@ -8,11 +8,11 @@
  * QQBot Agent Prompt Adapter
  */
 export const qqbotAgentPromptAdapter = {
-  messageToolCapabilities: ({ cfg, accountId }: { cfg: any; accountId?: string }) => {
+  messageToolCapabilities: ({ cfg, accountId }: { cfg?: any; accountId?: string | null }) => {
     return ['inlineButtons'];
   },
 
-  inboundFormattingHints: ({ cfg, accountId }: { cfg: any; accountId?: string }) => {
+  inboundFormattingHints: ({ accountId }: { accountId?: string | null }) => {
     return {
       text_markup: 'markdown',
       rules: [
