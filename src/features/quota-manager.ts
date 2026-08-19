@@ -48,7 +48,11 @@ export async function consumePassiveReplyQuota(params: QuotaConsumeParams): Prom
 
   const ttl = QUOTA_LIMITS[scope].ttlMs;
 
-  const cached = quotaCache.get(key) || { count: 0, expiresAt: now + ttl };
+  let cached = quotaCache.get(key);
+  if (cached && now > cached.expiresAt) {
+    cached = undefined;
+  }
+  cached = cached || { count: 0, expiresAt: now + ttl };
   cached.count += 1;
 
   quotaCache.set(key, cached);
