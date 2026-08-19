@@ -5,8 +5,9 @@
  * 不可用时提供最小降级实现。
  */
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 
-const req = createRequire(__filename);
+const req = createRequire(fileURLToPath(import.meta.url));
 
 let _setup: typeof import('openclaw/plugin-sdk/setup') | null | undefined;
 let _tools: typeof import('openclaw/plugin-sdk/setup-tools') | null | undefined;
