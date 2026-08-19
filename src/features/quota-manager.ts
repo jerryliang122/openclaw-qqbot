@@ -29,7 +29,7 @@ export async function checkPassiveReplyQuota(params: QuotaCheckParams): Promise<
   if (cached) {
     if (now > cached.expiresAt) {
       quotaCache.delete(key);
-      return true;
+      return false;
     }
 
     const limit = QUOTA_LIMITS[scope].count;
@@ -88,4 +88,8 @@ export function getQuotaStats(accountId: string, scope: 'c2c' | 'group'): {
   }
 
   return { activeSessions, totalUsage };
+}
+
+export function __test_getQuotaCache(): Map<string, QuotaState> {
+  return quotaCache;
 }
