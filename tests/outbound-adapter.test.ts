@@ -1,6 +1,7 @@
 import { strict as assert } from 'assert';
-import { clearQuotaCache } from '../src/features/quota-manager.js';
+import { clearQuotaCache, __test_getQuotaCache } from '../src/features/quota-manager.js';
 import { createQQBotOutboundAdapter } from '../src/outbound-adapter.js';
+import type { ResolvedQQBotAccount } from '../src/types.js';
 
 function test(name: string, fn: () => Promise<void> | void) {
   try {
@@ -17,6 +18,18 @@ function test(name: string, fn: () => Promise<void> | void) {
     throw err;
   }
 }
+
+const mockAccount: ResolvedQQBotAccount = {
+  accountId: 'test-account',
+  appId: 'test-app-id',
+  clientSecret: 'test-secret',
+  secretSource: 'config',
+  enabled: true,
+  markdownSupport: true,
+  userAgentSuffix: '',
+  processingTimeoutMs: 0,
+  config: {},
+};
 
 async function main() {
   clearQuotaCache();
@@ -70,6 +83,241 @@ async function main() {
       preferFinalAssistantVisibleText: false,
     });
     assert(adapter2.preferFinalAssistantVisibleText === false);
+  });
+
+  // ====== 配额感知行为测试 ======
+
+  await test('sendTextWithQuota: 有配额时包含 replyToId', async () => {
+    clearQuotaCache();
+    
+    let capturedReplyToId: string | undefined;
+    const adapter = createQQBotOutboundAdapter({
+      sendText: async ({ replyToId }) => {
+        capturedReplyToId = replyToId;
+        return { messageId: 'msg-1' };
+      },
+    });
+
+    await adapter.sendTextWithQuota({
+      to: 'qqbot:c2c:user123',
+      text: 'test message',
+      replyToId: 'original-msg-id',
+      account: mockAccount,
+    });
+
+    assert(capturedReplyToId === 'original-msg-id', 'Should include replyToId when quota available');
+  });
+
+  await test('sendTextWithQuota: 配额耗尽时省略 replyToId', async () => {
+    clearQuotaCache();
+    
+    let capturedReplyToId: string | undefined;
+    const adapter = createQQBotOutboundAdapter({
+      sendText: async ({ replyToId }) => {
+        capturedReplyToId = replyToId;
+        return { messageId: 'msg-2' };
+      },
+    });
+
+    // 消耗所有配额（C2C: 4次）
+    for (let i = 0; i < 4; i++) {
+      await adapter.sendTextWithQuota({
+        to: 'qqbot:c2c:user456',
+        text: `message ${i}`,
+        replyToId: 'msg-id-exhausted',
+        account: mockAccount,
+      });
+    }
+
+    // 第5次发送应该省略 replyToId
+    capturedReplyToId = undefined;
+    await adapter.sendTextWithQuota({
+      to: 'qqbot:c2c:user456',
+      text: 'message 5',
+      replyToId: 'msg-id-exhausted',
+      account: mockAccount,
+    });
+
+    assert(capturedReplyToId === undefined, 'Should omit replyToId when quota exhausted');
+  });
+
+  await test('sendMediaWithQuota: 有配额时包含 replyToId', async () => {
+    clearQuotaCache();
+    
+    let capturedReplyToId: string | undefined;
+    const adapter = createQQBotOutboundAdapter({
+      sendMedia: async ({ replyToId }) => {
+        capturedReplyToId = replyToId;
+        return { messageId: 'media-msg-1' };
+      },
+    });
+
+    await adapter.sendMediaWithQuota({
+      to: 'qqbot:c2c:user789',
+      source: 'https://example.com/image.png',
+      replyToId: 'original-media-msg-id',
+      account: mockAccount,
+    });
+
+    assert(capturedReplyToId === 'original-media-msg-id', 'Should include replyToId when quota available');
+  });
+
+  await test('sendMediaWithQuota: 配额耗尽时省略 replyToId', async () => {
+    clearQuotaCache();
+    
+    let capturedReplyToId: string | undefined;
+    const adapter = createQQBotOutboundAdapter({
+      sendMedia: async ({ replyToId }) => {
+        capturedReplyToId = replyToId;
+        return { messageId: 'media-msg-2' };
+      },
+    });
+
+    // 消耗所有配额
+    for (let i = 0; i < 4; i++) {
+      await adapter.sendMediaWithQuota({
+        to: 'qqbot:c2c:user999',
+        source: 'https://example.com/image.png',
+        replyToId: 'msg-id-media-exhausted',
+        account: mockAccount,
+      });
+    }
+
+    // 第5次发送应该省略 replyToId
+    capturedReplyToId = undefined;
+    await adapter.sendMediaWithQuota({
+      to: 'qqbot:c2c:user999',
+      source: 'https://example.com/image.png',
+      replyToId: 'msg-id-media-exhausted',
+      account: mockAccount,
+    });
+
+    assert(capturedReplyToId === undefined, 'Should omit replyToId when quota exhausted');
+  });
+
+  await test('canSendTyping: C2C 有配额且有 replyToId 返回 true', async () => {
+    clearQuotaCache();
+    
+    const adapter = createQQBotOutboundAdapter({});
+    const canSend = await adapter.canSendTyping({
+      to: 'qqbot:c2c:user111',
+      accountId: mockAccount.accountId,
+      replyToId: 'typing-msg-id',
+    });
+
+    assert(canSend === true, 'Should allow typing for C2C with quota and replyToId');
+  });
+
+  await test('canSendTyping: 群聊返回 false', async () => {
+    clearQuotaCache();
+    
+    const adapter = createQQBotOutboundAdapter({});
+    const canSend = await adapter.canSendTyping({
+      to: 'qqbot:group:group123',
+      accountId: mockAccount.accountId,
+      replyToId: 'typing-group-msg-id',
+    });
+
+    assert(canSend === false, 'Should NOT allow typing for group scope');
+  });
+
+  await test('canSendTyping: 无 replyToId 返回 false', async () => {
+    clearQuotaCache();
+    
+    const adapter = createQQBotOutboundAdapter({});
+    const canSend = await adapter.canSendTyping({
+      to: 'qqbot:c2c:user222',
+      accountId: mockAccount.accountId,
+      replyToId: '',
+    });
+
+    assert(canSend === false, 'Should NOT allow typing without replyToId');
+  });
+
+  await test('canSendTyping: 配额耗尽返回 false', async () => {
+    clearQuotaCache();
+    
+    const adapter = createQQBotOutboundAdapter({
+      sendText: async () => ({ messageId: 'msg' }),
+    });
+
+    // 消耗所有配额
+    for (let i = 0; i < 4; i++) {
+      await adapter.sendTextWithQuota({
+        to: 'qqbot:c2c:user333',
+        text: 'test',
+        replyToId: 'quota-msg-id',
+        account: mockAccount,
+      });
+    }
+
+    const canSend = await adapter.canSendTyping({
+      to: 'qqbot:c2c:user333',
+      accountId: mockAccount.accountId,
+      replyToId: 'quota-msg-id',
+    });
+
+    assert(canSend === false, 'Should NOT allow typing when quota exhausted');
+  });
+
+  await test('配额检查与发送之间过期', async () => {
+    clearQuotaCache();
+    
+    let capturedReplyToId: string | undefined;
+    const adapter = createQQBotOutboundAdapter({
+      sendText: async ({ replyToId }) => {
+        capturedReplyToId = replyToId;
+        return { messageId: 'msg-expired' };
+      },
+    });
+
+    // 先消耗一次配额
+    await adapter.sendTextWithQuota({
+      to: 'qqbot:c2c:user-expired',
+      text: 'first message',
+      replyToId: 'msg-id-expired',
+      account: mockAccount,
+    });
+
+    // 模拟配额过期
+    const quotaCache = __test_getQuotaCache();
+    const key = `${mockAccount.accountId}:c2c:msg-id-expired`;
+    const cached = quotaCache.get(key);
+    if (cached) {
+      cached.expiresAt = Date.now() - 1;
+    }
+
+    // 过期后发送应该省略 replyToId
+    capturedReplyToId = 'not-undefined';
+    await adapter.sendTextWithQuota({
+      to: 'qqbot:c2c:user-expired',
+      text: 'second message',
+      replyToId: 'msg-id-expired',
+      account: mockAccount,
+    });
+
+    assert(capturedReplyToId === undefined, 'Should omit replyToId when quota expired between check and send');
+  });
+
+  await test('accountId 回退到 account.accountId', async () => {
+    clearQuotaCache();
+    
+    let capturedAccountId: string | undefined;
+    const adapter = createQQBotOutboundAdapter({
+      sendText: async ({ accountId }) => {
+        capturedAccountId = accountId;
+        return { messageId: 'msg-account' };
+      },
+    });
+
+    // 不传 accountId，应该使用 account.accountId
+    await adapter.sendTextWithQuota({
+      to: 'qqbot:c2c:user-acc',
+      text: 'test',
+      account: mockAccount,
+    });
+
+    assert(capturedAccountId === mockAccount.accountId, 'Should fallback to account.accountId when accountId not provided');
   });
 
   console.log('All outbound adapter tests passed');
