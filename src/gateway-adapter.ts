@@ -10,7 +10,7 @@ import {
   stopAccountGracefully,
   logoutAndClearCredentials,
 } from './gateway/lifecycle.js';
-import type { OpenClawConfig } from 'openclaw/plugin-sdk/core';
+import type { OpenClawConfig } from 'openclaw/plugin-sdk/config-contracts';
 
 /**
  * QQBot Gateway Adapter
