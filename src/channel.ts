@@ -35,9 +35,18 @@ import { qqbotGatewayAdapter } from './gateway-adapter.js';
 import { qqbotChannelOutbound } from './outbound-adapter.js';
 import { qqbotHeartbeatAdapter } from './heartbeat-adapter.js';
 import { qqbotAgentPromptAdapter } from './agent-prompt-adapter.js';
-import { qqbotThreadingAdapter } from './threading-adapter.js';
 import { getQQBotApprovalCapability } from './features/approval-capability.js';
 import { stripMentionText } from './utils/mention.js';
+
+/**
+ * QQBot Threading Adapter
+ * QQBot 不支持 thread/topic，返回 'off' 模式
+ */
+const qqbotThreadingAdapter = {
+  resolveReplyToMode: () => 'off' as const,
+  buildToolContext: () => undefined,
+  resolveAutoThreadId: () => undefined,
+};
 
 /**
  * QQBot Groups Adapter

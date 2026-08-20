@@ -4,26 +4,7 @@
  * 处理目标解析、会话路由
  */
 
-import { normalizeTarget, isQQBotTarget } from './outbound/target.js';
-
-/**
- * 解析 QQBot 目标
- */
-function parseQQBotTarget(target: string): { scope: 'c2c' | 'group'; peerId: string } | null {
-  const parts = target.split(':');
-  if (parts.length < 3 || parts[0] !== 'qqbot') {
-    return null;
-  }
-
-  const scope = parts[1];
-  const peerId = parts[2];
-
-  if (scope !== 'c2c' && scope !== 'group') {
-    return null;
-  }
-
-  return { scope, peerId };
-}
+import { normalizeTarget, isQQBotTarget, parseTarget } from './outbound/target.js';
 
 /**
  * 解析会话对话
@@ -38,14 +19,18 @@ function resolveQQBotInboundConversation(params: {
     return null;
   }
 
-  const parsed = parseQQBotTarget(rawTarget);
+  const parsed = parseTarget(rawTarget);
   if (!parsed) {
     return null;
   }
 
+  if (parsed.scope !== 'c2c' && parsed.scope !== 'group') {
+    return null;
+  }
+
   return {
-    conversationId: parsed.peerId,
-    parentConversationId: parsed.peerId,
+    conversationId: parsed.targetId,
+    parentConversationId: parsed.targetId,
   };
 }
 
@@ -56,13 +41,17 @@ function resolveQQBotDeliveryTarget(params: {
   conversationId: string;
   parentConversationId?: string;
 }): { to: string } | null {
-  const parsed = parseQQBotTarget(params.parentConversationId || params.conversationId);
+  const parsed = parseTarget(params.parentConversationId || params.conversationId);
   if (!parsed) {
     return null;
   }
 
+  if (parsed.scope !== 'c2c' && parsed.scope !== 'group') {
+    return null;
+  }
+
   return {
-    to: `qqbot:${parsed.scope}:${parsed.peerId}`,
+    to: `qqbot:${parsed.scope}:${parsed.targetId}`,
   };
 }
 
