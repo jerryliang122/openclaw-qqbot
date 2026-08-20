@@ -13,7 +13,7 @@ declare module "openclaw/plugin-sdk" {
    */
   export interface OpenClawConfig {
     /** 频道配置 */
-    channels?: any;
+    channels?: import('./types.channels-2ARZmGtj.js').ChannelsConfig;
     /** 其他配置字段 */
     [key: string]: unknown;
   }

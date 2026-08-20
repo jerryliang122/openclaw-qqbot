@@ -49,6 +49,7 @@ export interface QQBotOutboundAdapter {
     text?: string;
     accountId?: string;
     replyToId?: string;
+    account: ResolvedQQBotAccount;
     log?: PluginLogger;
   }) => Promise<{ messageId?: string; error?: string }>;
   canSendTyping: (params: {
@@ -97,7 +98,7 @@ export function createQQBotOutboundAdapter(params: QQBotOutboundAdapterParams): 
   return {
     sendTextWithQuota: async ({ to, text, accountId, replyToId, account, log }) => {
       const scope = inferQQBotScope(to);
-      const resolvedAccountId = accountId || 'default';
+      const resolvedAccountId = accountId || account.accountId;
 
       const canPassiveReply = await checkPassiveReplyQuota({
         accountId: resolvedAccountId,
@@ -128,9 +129,9 @@ export function createQQBotOutboundAdapter(params: QQBotOutboundAdapterParams): 
       return result;
     },
 
-    sendMediaWithQuota: async ({ to, source, text, accountId, replyToId, log }) => {
+    sendMediaWithQuota: async ({ to, source, text, accountId, replyToId, account, log }) => {
       const scope = inferQQBotScope(to);
-      const resolvedAccountId = accountId || 'default';
+      const resolvedAccountId = accountId || account.accountId;
 
       const canPassiveReply = await checkPassiveReplyQuota({
         accountId: resolvedAccountId,
