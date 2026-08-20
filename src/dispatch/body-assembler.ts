@@ -144,10 +144,20 @@ function buildUserMessage(input: {
   return `${quotePart}${userContent}`;
 }
 
-/** Layer 3（合并版）：消息合并处理（已废弃）
+/** Layer 3（合并版）：消息合并处理
  * 
- * 注意：此函数目前不会被触发，因为已移除 concurrencyGuard 中间件。
- * 保留代码仅供参考，未来如需消息合并功能应考虑在框架层面实现。
+ * 由群聊消息合并中间件触发：
+ * - 当群聊中快速发送多条消息时，中间件会将它们合并
+ * - 合并后的消息会通过 ctx.state.mergedMessages 传递
+ * - 本函数将多条消息格式化为一个统一的消息体
+ * 
+ * 格式示例：
+ * [Merged messages begins]
+ * [小明] 问题 1
+ * [小红] 问题 2
+ * [Merged messages ends]
+ * [Current message]
+ * [小华] 问题 3 (@you)
  */
 function buildMergedUserMessage(input: {
   messages: MiddlewareContext[];
@@ -192,9 +202,9 @@ function formatMergedLine(
 ): string {
   const m = ctx.message;
   const content = (m.content ?? '').trim();
+  const atYouTag = opts.isLast && opts.wasMentioned ? ' (@you)' : '';
 
   if (opts.formatEnvelope && opts.isGroup) {
-    const atYouTag = opts.isLast && opts.wasMentioned ? ' (@you)' : '';
     return opts.formatEnvelope({
       channel: 'qqbot',
       from: formatSenderLabel(m.senderName, m.senderId),
@@ -204,7 +214,7 @@ function formatMergedLine(
     });
   }
   return opts.isGroup
-    ? `${formatSenderLabel(m.senderName, m.senderId)}: ${content}`
+    ? `${formatSenderLabel(m.senderName, m.senderId)}: ${content}${atYouTag}`
     : content;
 }
 

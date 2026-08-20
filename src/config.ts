@@ -1,4 +1,4 @@
-import type { ResolvedQQBotAccount, QQBotAccountConfig, ToolPolicy, GroupConfig } from "./types.js";
+import type { ResolvedQQBotAccount, QQBotAccountConfig, ToolPolicy, GroupConfig, GroupCoalesceConfig } from "./types.js";
 import type { OpenClawConfig, GroupPolicy } from "openclaw/plugin-sdk";
 
 // ============ Agent-aware mentionPatterns 解析 ============
@@ -84,12 +84,19 @@ const DEFAULT_GROUP_HISTORY_LIMIT = 20;
 /** 单条消息默认处理超时（0 = 不限制） */
 const DEFAULT_PROCESSING_TIMEOUT_MS = 0;
 
-const DEFAULT_GROUP_CONFIG: Omit<Required<GroupConfig>, "prompt"> = {
+/** 群消息合并默认配置 */
+const DEFAULT_GROUP_COALESCE_CONFIG: Required<GroupCoalesceConfig> = {
+  enabled: true,
+  maxBuffer: 50,
+};
+
+const DEFAULT_GROUP_CONFIG: Omit<Required<GroupConfig>, "prompt" | "coalesce"> & { coalesce: Required<GroupCoalesceConfig> } = {
   requireMention: true,
   ignoreOtherMentions: false,
   toolPolicy: "restricted",
   name: "",
   historyLimit: DEFAULT_GROUP_HISTORY_LIMIT,
+  coalesce: DEFAULT_GROUP_COALESCE_CONFIG,
 };
 
 /** 默认群消息行为 PE（可通过配置覆盖） */
@@ -126,13 +133,22 @@ export function isGroupAllowed(cfg: OpenClawConfig, groupOpenid: string, account
   }).allowed;
 }
 
-export type ResolvedGroupConfig = Required<GroupConfig>;
+export type ResolvedGroupConfig = Omit<Required<GroupConfig>, "prompt" | "coalesce"> & { 
+  prompt: string;
+  coalesce: Required<GroupCoalesceConfig>;
+};
 
 export function resolveGroupConfigFromAccount(account: ResolvedQQBotAccount, groupOpenid: string): ResolvedGroupConfig {
   const groups = account.config?.groups ?? {};
   const wildcardCfg = groups["*"] ?? {};
   const specificCfg = groups[groupOpenid] ?? {};
   const accountDefaultRequireMention = account.config?.defaultRequireMention ?? DEFAULT_GROUP_CONFIG.requireMention;
+  const accountDefaultCoalesce = account.config?.groupCoalesce ?? DEFAULT_GROUP_COALESCE_CONFIG;
+
+  const coalesce = {
+    enabled: specificCfg.coalesce?.enabled ?? wildcardCfg.coalesce?.enabled ?? accountDefaultCoalesce.enabled ?? DEFAULT_GROUP_COALESCE_CONFIG.enabled,
+    maxBuffer: specificCfg.coalesce?.maxBuffer ?? wildcardCfg.coalesce?.maxBuffer ?? accountDefaultCoalesce.maxBuffer ?? DEFAULT_GROUP_COALESCE_CONFIG.maxBuffer,
+  };
 
   return {
     requireMention: specificCfg.requireMention ?? wildcardCfg.requireMention ?? accountDefaultRequireMention,
@@ -141,6 +157,7 @@ export function resolveGroupConfigFromAccount(account: ResolvedQQBotAccount, gro
     name: specificCfg.name ?? wildcardCfg.name ?? DEFAULT_GROUP_CONFIG.name,
     prompt: specificCfg.prompt ?? wildcardCfg.prompt ?? DEFAULT_GROUP_PROMPT,
     historyLimit: specificCfg.historyLimit ?? wildcardCfg.historyLimit ?? DEFAULT_GROUP_CONFIG.historyLimit,
+    coalesce,
   };
 }
 
@@ -388,4 +405,19 @@ export function applyQQBotAccountConfig(
   }
 
   return next;
+}
+
+/** 解析群消息合并配置 */
+export function resolveGroupCoalesceConfig(cfg: OpenClawConfig, groupOpenid: string, accountId?: string): Required<GroupCoalesceConfig> {
+  return resolveGroupConfig(cfg, groupOpenid, accountId).coalesce;
+}
+
+/** 解析群消息合并是否启用 */
+export function resolveGroupCoalesceEnabled(cfg: OpenClawConfig, groupOpenid: string, accountId?: string): boolean {
+  return resolveGroupCoalesceConfig(cfg, groupOpenid, accountId).enabled;
+}
+
+/** 解析群消息合并最大缓冲数 */
+export function resolveGroupCoalesceMaxBuffer(cfg: OpenClawConfig, groupOpenid: string, accountId?: string): number {
+  return resolveGroupCoalesceConfig(cfg, groupOpenid, accountId).maxBuffer;
 }
