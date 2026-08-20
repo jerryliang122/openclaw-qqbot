@@ -1,32 +1,33 @@
 <div align="center">
 
-
-
 <img width="120" src="https://img.shields.io/badge/🤖-QQ_Bot-blue?style=for-the-badge" alt="QQ Bot" />
 
 # QQ Bot Channel Plugin for OpenClaw
 
-
+**Forked version with enhanced features for group/C2C differential handling and message coalescing**
 
 **Connect your AI assistant to QQ — private chat, group chat, and rich media, all in one plugin.**
 
-### 🚀 Current Version: `v2.0.1`
+### 🚀 Current Version: `v2.1.0`
 
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![QQ Bot](https://img.shields.io/badge/QQ_Bot-API_v2-red)](https://bot.q.qq.com/wiki/)
-[![Platform](https://img.shields.io/badge/platform-OpenClaw-orange)](https://github.com/tencent-connect/openclaw-qqbot)
+[![Platform](https://img.shields.io/badge/platform-OpenClaw-orange)](https://github.com/jerryliang122/openclaw-qqbot)
 [![Node.js](https://img.shields.io/badge/Node.js->=18-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-
+[![Fork](https://img.shields.io/badge/fork-enhanced-9cf)](https://github.com/jerryliang122/openclaw-qqbot)
 
 <br/>
 
 **[简体中文](README.zh.md) | English**
 
+> **Note**: This is a **forked version** with custom enhancements. For the official version, see [tencent-connect/openclaw-qqbot](https://github.com/tencent-connect/openclaw-qqbot).
+>
+> **Not published to npm** — install directly from GitHub or local source.
+
 Scan to join the QQ group chat
 
 <img width="400" alt="QQ QR Code" src="./docs/images/developer-group.png" />
-
 
 </div>
 
@@ -36,8 +37,9 @@ Scan to join the QQ group chat
 
 | Feature | Description |
 |---------|-------------|
+| 🔄 **Differential Handling** | Group: message coalescing (all messages processed, fast messages merged); C2C: user can interrupt (new message cancels old) |
 | 🔒 **Multi-Scene** | C2C private chat, group chat (@mention / autonomous dual mode) |
-| 👥 **Group Fine-Tuning** | Per-group @trigger rules, tool policies, custom prompts, message filtering |
+| 👥 **Group Fine-Tuning** | Per-group @trigger rules, tool policies, custom prompts, message filtering, coalescing config |
 | 🌐 **Dual Transport** | WebSocket (default) or Webhook (HTTP callback) — switch via config |
 | 🖼️ **Rich Media** | Send & receive images, voice, video, and files |
 | 🎙️ **Voice (STT/TTS)** | Speech-to-text transcription & text-to-speech replies |
@@ -175,7 +177,7 @@ Measures end-to-end latency from QQ server push to plugin response, broken down 
 
 > **You**: `/bot-version`
 >
-> **QQBot**: 🦞 Framework: OpenClaw 2026.3.13 (61d171a) / 🤖 Plugin: v2.0.1 / 🌟 GitHub repo
+> **QQBot**: 🦞 Framework: OpenClaw 2026.3.13 (61d171a) / 🤖 Plugin: v2.1.0 / 🌟 GitHub repo
 
 Shows framework version, plugin version, and a direct link to the official repository.
 
@@ -193,16 +195,13 @@ Shows framework version, plugin version, and a direct link to the official repos
 
 > **You**: `/bot-upgrade`
 >
-> **QQBot**: 📌 Current: v2.0.0 / ✅ New version v2.0.1 available / Click button below to confirm
+> **QQBot**: 📌 Current: v2.0.0 / ✅ New version v2.1.0 available / Click button below to confirm
 
 Credentials are automatically backed up before upgrade. Version existence is verified against npm before proceeding. Auto-recovery on failure.
 
 > ⚠️ Hot upgrade is currently not supported on Windows. Sending `/bot-upgrade` on Windows will return a manual upgrade guide instead.
 
-> ⚠️ v1.6.6 and below do not support hot upgrade via `/bot-upgrade`. Please upgrade using the following command:
-> ```bash
-> curl -fsSL https://raw.githubusercontent.com/tencent-connect/openclaw-qqbot/main/scripts/upgrade-via-npm.sh | bash
-> ```
+> **Note**: For this forked version, `/bot-upgrade` will upgrade from the GitHub repository. Make sure you have git access.
 
 <img width="360" src="docs/images/hot-update.jpg" alt="Hot Upgrade Demo" />
 
@@ -287,74 +286,55 @@ Toggle group @trigger behavior at runtime — changes persist instantly, no rest
 
 ### Step 2 — Install / Upgrade the Plugin
 
-**Option Zero: QR Code Login (Recommended, no manual credentials needed)**
+> **Note**: This is a forked version, not published to npm. Install from GitHub.
 
-v2.0.0 supports QR code binding — no need to manually copy AppID/AppSecret:
+**Option A: Install from GitHub (Recommended)**
 
 ```bash
-# Install the plugin
-openclaw plugins install @tencent-connect/openclaw-qqbot@latest
+# Install directly from GitHub
+openclaw plugins install git+https://github.com/jerryliang122/openclaw-qqbot.git
 
-# Login via QR code (either one)
-openclaw onboard
-# or
+# Or install a specific branch/tag
+openclaw plugins install git+https://github.com/jerryliang122/openclaw-qqbot.git#refactor/channel-plugin-standard
+```
+
+**Option B: Install from Local Source**
+
+```bash
+# Clone the repo
+git clone https://github.com/jerryliang122/openclaw-qqbot.git
+cd openclaw-qqbot
+
+# Build
+npm install
+npm run build
+
+# Install to OpenClaw (method 1: link)
+openclaw plugins link .
+
+# Or install to OpenClaw (method 2: pack)
+npm pack
+openclaw plugins install ./openclaw-qqbot-2.1.0.tgz
+```
+
+**Option C: Configure Credentials**
+
+After installation, configure your QQ bot credentials:
+
+```bash
+# Via QR code (recommended)
 openclaw channels login --channel qqbot
-```
 
-A QR code will appear in the terminal. Scan it with your phone QQ to automatically complete credential setup and account configuration — no manual key input required.
-
-
-**Option A: Remote One-Liner (Easiest, no clone required)**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/tencent-connect/openclaw-qqbot/main/scripts/upgrade-via-npm.sh \
-  | bash -s -- --appid YOUR_APPID --secret YOUR_SECRET
-```
-
-One command does it all: download script → cleanup old plugins → install → configure channel → restart service. Once done, open QQ and start chatting!
-
-> `--appid` and `--secret` are **required for first-time install**. For subsequent upgrades, run the following command to upgrade to the latest version:
-> ```bash
-> curl -fsSL https://raw.githubusercontent.com/tencent-connect/openclaw-qqbot/main/scripts/upgrade-via-npm.sh | bash
-> ```
-
-**Option B: Local Script (if you've cloned the repo)**
-
-```bash
-# Via npm
-bash ./scripts/upgrade-via-npm.sh --appid YOUR_APPID --secret YOUR_SECRET
-
-# Or via source
-bash ./scripts/upgrade-via-source.sh --appid YOUR_APPID --secret YOUR_SECRET
-```
-
-**Common flags:**
-
-| Flag | Description |
-|------|-------------|
-| `--appid <id> --secret <secret>` | Configure channel (required for first install, or to change credentials) |
-| `--version <version>` | Install a specific version (npm script only) |
-| `--self-version` | Install the version from local `package.json` (npm script only) |
-| `-h` / `--help` | Show full usage |
-
-> Environment variables `QQBOT_APPID` / `QQBOT_SECRET` are also supported.
-
-**Option C: Manual Install / Upgrade**
-
-```bash
-# Uninstall old plugins (skip if first install)
-openclaw plugins uninstall qqbot
-openclaw plugins uninstall openclaw-qqbot
-
-# Install latest
-openclaw plugins install @tencent-connect/openclaw-qqbot@latest
-
-# Configure channel (first install only)
+# Or manually
 openclaw channels add --channel qqbot --token "AppID:AppSecret"
 
 # Start / restart
 openclaw gateway restart
 ```
+
+> Environment variables `QQBOT_APPID` / `QQBOT_SECRET` are also supported.
+
+> **For the official version**: See [tencent-connect/openclaw-qqbot](https://github.com/tencent-connect/openclaw-qqbot)
 
 ### Step 3 — Test
 
@@ -503,8 +483,10 @@ By default, the bot **only responds when @mentioned** in a group. You can config
 
 | Mode | Config Value | Behavior |
 |------|-------------|----------|
-| **@ only** | `true` (default) | Only messages that @mention the bot trigger a reply |
+| **@ only** | `true` (default) | Only messages that @mention the bot trigger AI processing. Non-@ messages are still cached in history but don't trigger AI |
 | **Autonomous** | `false` | AI decides on its own whether each message needs a reply — no @ required |
+
+> **Important**: Even when `requireMention: true`, non-@ messages are **still cached** in the group history buffer. They just don't trigger AI processing.
 
 **Priority chain** (highest to lowest):
 
@@ -559,6 +541,7 @@ Besides `requireMention`, each group supports these settings:
 | `toolPolicy` | `"full" \| "restricted" \| "none"` | `"restricted"` | Tool scope available to AI in this group. `full`=all tools; `restricted`=sensitive tools restricted (e.g., command execution, file ops); `none`=no tool calls allowed |
 | `prompt` | `string` | built-in default | Group-specific system prompt, appended after global systemPrompt |
 | `historyLimit` | `number` | `50` | Cached group history message count |
+| `coalesce` | `object` | `{enabled: true, maxBuffer: 50}` | Message coalescing config for this group (see below) |
 
 **Full example with multiple groups:**
 
@@ -615,6 +598,158 @@ Control which groups are allowed via `groupPolicy`:
 ```
 
 > You can also use [**`/bot-group-always`**](#bot-group-always--group-response-mode-toggle) to toggle account-level defaults at runtime without restarting.
+
+---
+
+### Group vs C2C Differential Handling
+
+The plugin implements different message handling strategies for group and private chats:
+
+#### Group Chat (Coalescing Strategy)
+
+- **All messages are processed** — nothing is dropped
+- **Fast messages are merged** — when multiple messages arrive quickly, they are combined into one context
+- **SessionKey format**: `qqbot:{accountId}:group:{groupId}:coalescing`
+- **Admission strategy**: `cancel-only` — doesn't cancel ongoing tasks
+
+**Example behavior**:
+
+```
+User A: "Question 1"  → Start processing
+User B: "Question 2"  → Buffer and wait
+User C: "Question 3"  → Buffer and wait
+
+Question 1 completes → Merge [Q1, Q2, Q3] → AI sees combined context
+```
+
+#### C2C Private Chat (Exclusive Strategy)
+
+- **User can interrupt** — sending a new message cancels the previous one
+- **Last message wins** — only the most recent message is processed
+- **SessionKey format**: `qqbot:{accountId}:{userId}`
+- **Admission strategy**: `exclusive` — new message cancels old
+
+**Example behavior**:
+
+```
+User A: "Question 1"  → Start processing
+User A: "Question 2"  → Cancel Q1, start processing Q2
+```
+
+#### Why This Design?
+
+- **In groups**: All user messages should be preserved and addressed
+- **In C2C**: Users can change their mind mid-conversation
+- **Aligns with user expectations** in different chat contexts
+
+---
+
+### Message Coalescing Configuration (`groupCoalesce`)
+
+Control how group messages are merged when they arrive in quick succession:
+
+```json
+{
+  "channels": {
+    "qqbot": {
+      "groupCoalesce": {
+        "enabled": true,
+        "maxBuffer": 50
+      },
+      "accounts": {
+        "default": {
+          "groups": {
+            "GROUP_123": {
+              "coalesce": {
+                "maxBuffer": 100
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `boolean` | `true` | Enable/disable message coalescing |
+| `maxBuffer` | `number` | `50` | Maximum number of messages to buffer per group |
+
+**Priority chain**: `groups.{groupId}.coalesce` > `groupCoalesce` (account-level) > defaults
+
+**When enabled**:
+
+- Fast messages in groups are buffered and merged
+- The AI sees combined context with clear formatting:
+  ```
+  [Merged messages begins]
+  [User A] Question 1
+  [User B] Question 2
+  [Merged messages ends]
+  [Current message]
+  [User C] Question 3 (@you)
+  ```
+- Prevents message loss and ensures all user input is addressed
+
+**Configuration example**:
+
+```json
+{
+  "channels": {
+    "qqbot": {
+      "groupCoalesce": {
+        "enabled": true,
+        "maxBuffer": 50
+      },
+      "accounts": {
+        "default": {
+          "groups": {
+            "*": {
+              "coalesce": {
+                "maxBuffer": 50
+              }
+            },
+            "HIGH_TRAFFIC_GROUP": {
+              "coalesce": {
+                "maxBuffer": 100
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+---
+
+### Middleware Execution Order
+
+The plugin processes messages through a carefully ordered middleware chain:
+
+1. **Error Handler** — Catches exceptions at the outermost layer
+2. **Message Filter** — Bot echo + message deduplication
+3. **Policy Injector** — Injects `ctx.state.policy` with dynamic config
+4. **History Buffer** — Caches all group messages (including non-@)
+5. **Access Control** — Dynamic pairing/allowlist checks
+6. **Mention Gate** — Filters based on @mention rules
+7. **Content Sanitizer** — Strips @markers, parses face tags
+8. **Rate Limiter** — Three-layer throttling
+9. **Slash Commands** — Intercepts `/bot-*` commands
+10. **Message Coalescer** (groups only) — Merges fast messages
+11. **Typing Indicator** (C2C only) — Shows "typing..." status
+12. **Quote Reference** — Parses quoted message context
+13. **Attachment Processor** — Downloads/converts media
+14. **Envelope Formatter** — Builds final message body
+
+**Key points**:
+
+- History buffer runs **before** mention gate → all messages are cached
+- Message coalescer only runs for **group** messages
+- Typing indicator only runs for **C2C** messages
 
 ---
 
@@ -717,19 +852,17 @@ After receiving a private message, the bot shows "typing…" and renews it perio
 
 ## 🤝 Contributors
 
-Thanks to all the developers who have contributed to this project!
+This is a forked version. For contributors to the official version, see [tencent-connect/openclaw-qqbot](https://github.com/tencent-connect/openclaw-qqbot/graphs/contributors).
 
-<a href="https://github.com/tencent-connect/openclaw-qqbot/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=tencent-connect/openclaw-qqbot" />
+<a href="https://github.com/jerryliang122/openclaw-qqbot/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=jerryliang122/openclaw-qqbot" />
 </a>
 
 ## 💖 Acknowledgements
 
-Special thanks to [@sliverp](https://github.com/sliverp) for outstanding contributions to the project!
-
-<a href="https://github.com/sliverp"><img src="https://avatars.githubusercontent.com/u/38134380?v=4" width="48" height="48" alt="sliverp" title="sliverp"/></a>
-
-Thanks to [Tencent Cloud Lighthouse](https://cloud.tencent.com/product/lighthouse) for the deep collaboration. For raising crawfish, choose Tencent Cloud Lighthouse!
+- Original project: [tencent-connect/openclaw-qqbot](https://github.com/tencent-connect/openclaw-qqbot)
+- Special thanks to [@sliverp](https://github.com/sliverp) for outstanding contributions to the original project!
+- Thanks to [Tencent Cloud Lighthouse](https://cloud.tencent.com/product/lighthouse) for the deep collaboration.
 
 <a href="https://cloud.tencent.com/product/lighthouse">
   <img alt="Tencent Cloud Lighthouse" src="./docs/images/lighthouse-head.png" height="500" style="max-width:80%; height:auto;"/>
@@ -739,6 +872,6 @@ Thanks to [Tencent Cloud Lighthouse](https://cloud.tencent.com/product/lighthous
 
 <div align="center">
 
-[![Star History Chart](https://api.star-history.com/svg?repos=tencent-connect/openclaw-qqbot&type=date&legend=top-left)](https://www.star-history.com/#tencent-connect/openclaw-qqbot&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/svg?repos=jerryliang122/openclaw-qqbot&type=date&legend=top-left)](https://www.star-history.com/#jerryliang122/openclaw-qqbot&type=date&legend=top-left)
 
 </div>
