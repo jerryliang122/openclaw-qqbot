@@ -1,7 +1,6 @@
 /**
  * QQBot Typing 续期管理
  *
- * 显示时长：60 秒
  * 续期时机：50 秒后
  * 最大续期：10 次（约 10 分钟）
  */
@@ -11,7 +10,6 @@ import { checkPassiveReplyQuota, consumePassiveReplyQuota, inferQQBotScope } fro
 
 const activeTypingSessions = new Map<string, TypingState>();
 
-const TYPING_DURATION_MS = 60 * 1000;
 const TYPING_RENEWAL_MS = 50 * 1000;
 const MAX_RENEWALS = 10;
 
