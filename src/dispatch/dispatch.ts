@@ -71,6 +71,11 @@ export async function dispatchToOpenClaw(
 
   const cfg = adapters.getConfig?.() ?? {};
 
+  const isGroup = envelope.chatScope === 'group';
+
+  // 群聊/私聊差异化 sessionKey：
+  // - 群聊：使用 group:{groupId}:coalescing 后缀，表明消息已经过合并处理
+  // - 私聊：保持原有格式，允许用户"插嘴"（新消息取消旧消息）
   const peerId = envelope.chatScope === 'group' 
     ? (envelope.groupId ?? envelope.senderId) 
     : envelope.senderId;
@@ -83,7 +88,12 @@ export async function dispatchToOpenClaw(
       kind: envelope.chatScope === 'group' ? 'group' : 'direct',
       id: peerId,
     },
-  }) ?? { sessionKey: `qqbot:${account.accountId}:${peerId}`, accountId: account.accountId };
+  }) ?? { 
+    sessionKey: isGroup 
+      ? `qqbot:${account.accountId}:group:${peerId}:coalescing`
+      : `qqbot:${account.accountId}:${peerId}`, 
+    accountId: account.accountId 
+  };
 
   const qualifiedTarget = envelope.targetId;
   const agentId = route.agentId ?? 'default';
@@ -224,26 +234,36 @@ export async function dispatchToOpenClaw(
     }
   };
 
-  // Turn adoption lifecycle（对齐 telegram）：
-  // - abortSignal：排队中的 turn 被新消息取代（superseded）时，框架中止旧 turn；
-  //   与请求级 ctx.signal 合并后作为 agent run 的 AbortSignal。
-  // - onAdopted/onDeferred/onAbandoned：无 spool 场景下仅做可观测性日志。
+  // Turn adoption lifecycle（群聊/私聊差异化）：
+  // - 私聊：exclusive 模式，新消息取消旧消息（用户可"插嘴"）
+  // - 群聊：cancel-only 模式，不取消正在处理的任务（消息已由中间件合并）
+  // - abortSignal：仅私聊时传递，用于取消正在处理的任务
   const turnAbort = new AbortController();
+  const admission = isGroup ? 'cancel-only' as const : 'exclusive' as const;
+  
   const turnAdoptionLifecycle = {
-    admission: 'exclusive' as const,
-    abortSignal: turnAbort.signal,
+    admission,
+    abortSignal: admission === 'exclusive' ? turnAbort.signal : undefined,
     onAdopted: () => {
-      dlog?.debug(`turn adopted sessionKey=${route.sessionKey}`);
+      dlog?.debug(`turn adopted (${admission}) sessionKey=${route.sessionKey}`);
     },
     onDeferred: () => {
-      dlog?.debug(`turn deferred behind active turn sessionKey=${route.sessionKey}`);
+      if (admission === 'exclusive') {
+        dlog?.debug(`turn deferred behind active turn sessionKey=${route.sessionKey}`);
+      }
     },
     onAbandoned: () => {
-      dlog?.info(`turn abandoned (superseded) — aborting sessionKey=${route.sessionKey}`);
-      turnAbort.abort();
+      if (admission === 'exclusive') {
+        dlog?.info(`turn abandoned (superseded) — aborting sessionKey=${route.sessionKey}`);
+        turnAbort.abort();
+      } else {
+        dlog?.debug(`turn cancelled but continuing sessionKey=${route.sessionKey}`);
+      }
     },
   };
-  const combinedAbortSignal = combineAbortSignals(ctx.signal, turnAbort.signal);
+  const combinedAbortSignal = admission === 'exclusive' 
+    ? combineAbortSignals(ctx.signal, turnAbort.signal)
+    : ctx.signal;
 
   let dispatchError: unknown;
   const hadDispatchError = () => dispatchError !== undefined;
