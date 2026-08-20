@@ -1,10 +1,8 @@
 {
-  "name": "@tencent-connect/openclaw-qqbot",
+  "name": "openclaw-qqbot",
   "version": "2.1.0",
-  "description": "QQ Bot channel plugin for OpenClaw",
-  "publishConfig": {
-    "access": "public"
-  },
+  "description": "QQ Bot channel plugin for OpenClaw (forked version with enhanced features)",
+  "private": true,
   "type": "module",
   "main": "dist/index.cjs",
   "types": "dist/index.d.ts",
@@ -53,9 +51,9 @@
     "@tencent-connect/qqbot-connector": "1.2.0",
     "openclaw": "*"
   },
-  "homepage": "https://github.com/tencent-connect/openclaw-qqbot",
+  "homepage": "https://github.com/jerryliang122/openclaw-qqbot",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tencent-connect/openclaw-qqbot.git"
+    "url": "git+https://github.com/jerryliang122/openclaw-qqbot.git"
   }
 }
