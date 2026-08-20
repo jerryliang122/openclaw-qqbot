@@ -7,7 +7,7 @@
  * - 注册 "approval.native" 运行时上下文（框架据此自动引导 native 审批 handler）
  * - 登出时凭证清除
  */
-import type { OpenClawConfig } from 'openclaw/plugin-sdk/core';
+import type { OpenClawConfig } from 'openclaw/plugin-sdk/config-contracts';
 import type { ResolvedQQBotAccount } from '../types.js';
 import { DEFAULT_ACCOUNT_ID, resolveQQBotAccount, applyQQBotAccountConfig } from '../config.js';
 import { getQQBotRuntime } from '../runtime.js';

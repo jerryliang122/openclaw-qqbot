@@ -3,6 +3,12 @@
  *
  * C2C: 4 次/msg_id, 60 分钟
  * Group: 5 次/msg_id, 5 分钟
+ *
+ * 重要说明：
+ * - QQ Bot 平台的 msg_id 有时效性限制（C2C: 60分钟，Group: 5分钟）
+ * - 过期后的 msg_id 不能再用于被动回复（API 会返回错误 40034128）
+ * - 这是平台限制，不是"配额恢复"
+ * - 因此 checkPassiveReplyQuota 在 msg_id 过期时返回 false，而非重置配额
  */
 
 import type { QuotaState, QuotaCheckParams, QuotaConsumeParams } from '../types-plugin.js';
@@ -27,6 +33,8 @@ export async function checkPassiveReplyQuota(params: QuotaCheckParams): Promise<
 
   const cached = quotaCache.get(key);
   if (cached) {
+    // msg_id 过期后不能再用于被动回复
+    // 这是 QQ Bot 平台限制，API 会返回错误 40034128
     if (now > cached.expiresAt) {
       quotaCache.delete(key);
       return false;

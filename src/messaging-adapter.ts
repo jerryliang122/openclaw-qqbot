@@ -7,7 +7,7 @@
 import { normalizeTarget, isQQBotTarget, parseTarget } from './outbound/target.js';
 
 /**
- * 解析会话对话
+ * 解析会话目标
  */
 function resolveQQBotInboundConversation(params: {
   to?: string;
@@ -28,9 +28,12 @@ function resolveQQBotInboundConversation(params: {
     return null;
   }
 
+  // 保存完整目标字符串（包括 scope），避免后续解析时丢失 scope 信息
+  const fullTarget = `qqbot:${parsed.scope}:${parsed.targetId}`;
+
   return {
-    conversationId: parsed.targetId,
-    parentConversationId: parsed.targetId,
+    conversationId: fullTarget,
+    parentConversationId: fullTarget,
   };
 }
 
@@ -41,7 +44,12 @@ function resolveQQBotDeliveryTarget(params: {
   conversationId: string;
   parentConversationId?: string;
 }): { to: string } | null {
-  const parsed = parseTarget(params.parentConversationId || params.conversationId);
+  const targetStr = params.parentConversationId || params.conversationId;
+  if (!targetStr) {
+    return null;
+  }
+
+  const parsed = parseTarget(targetStr);
   if (!parsed) {
     return null;
   }
