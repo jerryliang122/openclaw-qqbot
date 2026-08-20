@@ -4,7 +4,7 @@
  * 处理目标解析、会话路由
  */
 
-import { normalizeTarget, isQQBotTarget, parseTarget } from './outbound/target.js';
+import { normalizeTarget, isQQBotTarget, tryParseTarget } from './outbound/target.js';
 
 /**
  * 解析会话目标
@@ -19,7 +19,7 @@ function resolveQQBotInboundConversation(params: {
     return null;
   }
 
-  const parsed = parseTarget(rawTarget);
+  const parsed = tryParseTarget(rawTarget);
   if (!parsed) {
     return null;
   }
@@ -49,7 +49,7 @@ function resolveQQBotDeliveryTarget(params: {
     return null;
   }
 
-  const parsed = parseTarget(targetStr);
+  const parsed = tryParseTarget(targetStr);
   if (!parsed) {
     return null;
   }

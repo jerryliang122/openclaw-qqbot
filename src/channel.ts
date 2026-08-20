@@ -200,10 +200,15 @@ export const qqbotPlugin = createChatChannelPlugin({
     mentions: qqbotMentionsAdapter,
 
     setup: qqbotSetupAdapter,
-    setupWizard: qqbotSetupWizard as any,
-    auth: { login: qqbotLogin as any },
-    // @ts-ignore onboarding 兼容
-    onboarding: qqbotOnboardingAdapter,
+    // setupWizard 类型断言：ChannelSetupWizard 与框架期望的接口存在差异
+    // 主要差异在于 credentials 字段的结构，运行时行为正确
+    setupWizard: qqbotSetupWizard as unknown as Parameters<typeof createChatChannelPlugin>[0]['base']['setupWizard'],
+    // auth.login 类型断言：框架接口可能不包含 login 字段
+    // 运行时行为正确，类型断言确保类型安全
+    auth: { login: qqbotLogin as unknown as NonNullable<Parameters<typeof createChatChannelPlugin>[0]['base']['auth']>['login'] },
+    // onboarding 字段：框架 ChatChannelPluginBase 不包含此字段，但运行时需要
+    // 使用类型断言绕过类型检查
+    ...(qqbotOnboardingAdapter ? { onboarding: qqbotOnboardingAdapter } : {}),
 
     approvalCapability: getQQBotApprovalCapability(),
   },

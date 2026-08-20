@@ -19,6 +19,7 @@ import { registerGateway, unregisterGateway, getGateway } from '../outbound/outb
 import { saveCredentialBackup, loadCredentialBackup } from '../features/credential-backup.js';
 import { triggerUpdateCheck } from '../features/update-checker.js';
 import { CHANNEL_APPROVAL_NATIVE_RUNTIME_CONTEXT_CAPABILITY } from '../features/approval-capability.js';
+import { cleanupTypingByAccount } from '../typing-lifecycle.js';
 
 export interface StartAccountContext {
   account: ResolvedQQBotAccount;
@@ -155,7 +156,10 @@ export async function stopAccountGracefully(params: {
   const { accountId, log } = params;
   const gw = getGateway(accountId);
 
-  // 1. 主动停止 bot
+  // 1. 清理 typing session（防止账户重启后旧 session 阻塞新 session）
+  cleanupTypingByAccount(accountId);
+
+  // 2. 主动停止 bot
   if (gw) {
     try {
       await gw.stop();

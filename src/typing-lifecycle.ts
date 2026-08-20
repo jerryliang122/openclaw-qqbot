@@ -165,3 +165,22 @@ export function isTypingActive(accountId: string, replyToId: string): boolean {
   }
   return false;
 }
+
+/**
+ * 清理指定账户的所有 typing session
+ * 在账户停止时调用，防止旧 session 阻塞新 session
+ */
+export function cleanupTypingByAccount(accountId: string): void {
+  const keysToDelete: string[] = [];
+  
+  for (const [key, state] of activeTypingSessions.entries()) {
+    if (key.startsWith(`${accountId}:`)) {
+      clearTimeout(state.timer);
+      keysToDelete.push(key);
+    }
+  }
+  
+  for (const key of keysToDelete) {
+    activeTypingSessions.delete(key);
+  }
+}

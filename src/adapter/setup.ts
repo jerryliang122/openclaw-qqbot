@@ -7,7 +7,11 @@
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
-const req = createRequire(fileURLToPath(import.meta.url));
+// CJS 兼容：__filename 在 CJS 中可用，ESM 中使用 import.meta.url
+const __file = typeof __filename !== 'undefined' 
+  ? __filename 
+  : fileURLToPath(import.meta.url);
+const req = createRequire(__file);
 
 let _setup: typeof import('openclaw/plugin-sdk/setup') | null | undefined;
 let _tools: typeof import('openclaw/plugin-sdk/setup-tools') | null | undefined;
