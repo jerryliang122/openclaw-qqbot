@@ -13,14 +13,7 @@ declare module "openclaw/plugin-sdk" {
    */
   export interface OpenClawConfig {
     /** 频道配置 */
-    channels?: {
-      qqbot?: unknown;
-      telegram?: unknown;
-      discord?: unknown;
-      slack?: unknown;
-      whatsapp?: unknown;
-      [key: string]: unknown;
-    };
+    channels?: import('./types.channels-2ARZmGtj.js').ChannelsConfig;
     /** 其他配置字段 */
     [key: string]: unknown;
   }
@@ -562,7 +555,7 @@ declare module "openclaw/plugin-sdk" {
     cfg: OpenClawConfig;
     channelKey: string;
     accountId: string;
-    name: string;
+    name?: string;
   }): OpenClawConfig;
 
   /**
@@ -673,6 +666,26 @@ declare module "openclaw/plugin-sdk" {
 
   /** 规范化账户 ID */
   export function normalizeAccountId(accountId: string | undefined | null): string;
+}
+
+declare module "openclaw/plugin-sdk/question-gateway-runtime" {
+  export const questionGatewayRuntime: {
+    resolveOption: (params: {
+      cfg: unknown;
+      questionId: string;
+      optionIndex: number;
+      senderId?: string;
+      gatewayUrl?: string;
+      clientDisplayName?: string;
+    }) => Promise<{ status: string }>;
+    resolveReactionIndex: (...args: unknown[]) => unknown;
+    resolveReaction: (...args: unknown[]) => unknown;
+    registerChannelDelivery: (...args: unknown[]) => unknown;
+    readAskUserQuestionId: (...args: unknown[]) => unknown;
+    reactionEmojis: readonly string[];
+    prepareReactionPayloadForDelivery: (...args: unknown[]) => unknown;
+    readReactionBinding: (...args: unknown[]) => unknown;
+  };
 }
 
 declare module "openclaw/plugin-sdk/setup" {

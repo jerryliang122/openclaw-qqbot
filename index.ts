@@ -67,3 +67,26 @@ export {
 } from './src/outbound/streaming-controller.js';
 export * from './src/types.js';
 export * from './src/config.js';
+export { qqbotChannelOutbound } from './src/outbound-adapter.js';
+
+// Quota management
+export { ReplyLimiter } from './src/outbound/reply-limiter.js';
+export {
+  checkPassiveReplyQuota,
+  consumePassiveReplyQuota,
+  inferQQBotScope,
+  clearQuotaCache,
+  getQuotaStats,
+} from './src/features/quota-manager.js';
+
+// Typing lifecycle
+export {
+  c2cTypingIndicator,
+  resolveTypingIntervalMs,
+  MIN_TYPING_INTERVAL_MS,
+  POST_MESSAGE_REFRESH_DELAY_MS,
+} from './src/middleware/typing.js';
+export {
+  subscribeOutboundMessage,
+  notifyOutboundMessageSent,
+} from './src/features/typing-refresh.js';

@@ -3,7 +3,7 @@
  *
  * 处理 SDK 的 message / interaction 事件：
  * - message: 中间件处理完毕后，将消息转发到 OpenClaw AI
- * - interaction: 配置更新 / 审批按钮
+ * - interaction: 配置更新 / 审批按钮 / ask_user 按钮
  */
 
 import type { MiddlewareContext, QQBotInboundMessage, InteractionEvent } from '@tencent-connect/qqbot-nodejs';
@@ -14,6 +14,7 @@ import { dispatchToOpenClaw } from '../dispatch/index.js';
 import { runWithRequestContext } from '../request-context.js';
 import { authorizeQQBotApprovalAction } from '../features/approval-capability.js';
 import { parseApprovalButtonData } from '../features/approval-helpers.js';
+import { parseQuestionButtonData } from '../features/question-helpers.js';
 import { recordKnownUser } from '../features/proactive.js';
 import { cacheMsgId } from '../features/msgid-cache.js';
 import { getAdapters } from '../adapter/resolve.js';
@@ -96,6 +97,13 @@ export async function handleInteraction(
     } catch {
       try { await acknowledgeInteraction(event.id); } catch { /* ignore */ }
     }
+    return;
+  }
+
+  // question 按钮（ask_user）优先于审批按钮
+  const buttonData = event.data?.resolved?.button_data;
+  if (buttonData?.startsWith('qqbot:q:')) {
+    await handleQuestion(event, account, runtime, log, acknowledgeInteraction);
     return;
   }
 
@@ -193,6 +201,43 @@ async function handleApproval(
     });
   } catch (err) {
     log.error(`interaction approve error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+// ── Question 按钮处理（ask_user）──
+
+async function handleQuestion(
+  event: InteractionEvent,
+  account: ResolvedQQBotAccount,
+  runtime: PluginRuntime,
+  log: PluginLogger,
+  ack: (id: string) => Promise<void>,
+): Promise<void> {
+  try { await ack(event.id); } catch { /* ignore */ }
+
+  const buttonData = event.data?.resolved?.button_data;
+  if (!buttonData) return;
+
+  const parsed = parseQuestionButtonData(buttonData);
+  if (!parsed) return;
+
+  // 无授权检查：ask_user 问题面向所有参与者（与审批不同，question 不是安全敏感操作）。
+  // 框架侧 questionGatewayRuntime.resolveOption 已处理过期/重复提交等边界情况。
+  const operatorId = resolveOperatorId(event);
+  const cfg = getAdapters(runtime).getConfig?.() ?? {};
+
+  try {
+    const { questionGatewayRuntime } = await import('openclaw/plugin-sdk/question-gateway-runtime');
+    const result = await questionGatewayRuntime.resolveOption({
+      cfg,
+      questionId: parsed.questionId,
+      optionIndex: parsed.optionIndex,
+      senderId: operatorId,
+      clientDisplayName: 'QQBot question',
+    });
+    log.debug(`[question] resolved questionId=${parsed.questionId} optionIndex=${parsed.optionIndex} status=${result.status}`);
+  } catch (err) {
+    log.error(`[question] resolve error: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 

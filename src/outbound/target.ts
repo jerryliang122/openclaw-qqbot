@@ -47,8 +47,16 @@ export function normalizeTarget(target: string): string | undefined {
 
 /**
  * 解析目标地址字符串为 SDK ReplyTarget
+ * 
+ * 注意：此函数总是返回 ReplyTarget，即使输入无效（targetId 可能为空字符串）
+ * 如果需要严格验证，请使用 tryParseTarget
  */
 export function parseTarget(to: string): ReplyTarget {
+  // 空字符串或无效输入返回默认值
+  if (!to || typeof to !== 'string') {
+    return { scope: 'c2c', targetId: '' };
+  }
+
   const id = to.replace(/^qqbot:/i, '');
 
   if (id.startsWith('c2c:')) {
@@ -57,7 +65,45 @@ export function parseTarget(to: string): ReplyTarget {
   if (id.startsWith('group:')) {
     return { scope: 'group', targetId: id.slice(6) };
   }
+  // channel 不被 SDK ChatScope 支持，当作 c2c 处理
+  if (id.startsWith('channel:')) {
+    return { scope: 'c2c', targetId: id.slice(8) };
+  }
 
   // 默认当作 c2c（32 位十六进制 / UUID 格式的 openid）
   return { scope: 'c2c', targetId: id };
+}
+
+/**
+ * 严格解析目标地址字符串，验证输入有效性
+ * @returns ReplyTarget 或 null（如果输入无效）
+ */
+export function tryParseTarget(to: string): ReplyTarget | null {
+  // 空字符串或无效输入返回 null
+  if (!to || typeof to !== 'string') {
+    return null;
+  }
+
+  const id = to.replace(/^qqbot:/i, '');
+
+  // 检查是否是有效的目标格式
+  if (id.startsWith('c2c:')) {
+    const targetId = id.slice(4);
+    if (!targetId) return null; // c2c: 后面必须有内容
+    return { scope: 'c2c', targetId };
+  }
+  if (id.startsWith('group:')) {
+    const targetId = id.slice(6);
+    if (!targetId) return null; // group: 后面必须有内容
+    return { scope: 'group', targetId };
+  }
+
+  // 默认当作 c2c（32 位十六进制 / UUID 格式的 openid）
+  // 但必须匹配有效的 openid 格式
+  if (OPENID_HEX_RE.test(id) || OPENID_UUID_RE.test(id)) {
+    return { scope: 'c2c', targetId: id };
+  }
+
+  // 无效格式返回 null
+  return null;
 }

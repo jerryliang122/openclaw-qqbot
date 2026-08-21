@@ -24,6 +24,8 @@ import { DeliverDebouncer } from '../outbound/debounce.js';
 import { StreamingController, shouldUseStreaming } from '../outbound/streaming-controller.js';
 import { getAdapters } from '../adapter/resolve.js';
 import { clearGroupHistory } from '../features/history-store.js';
+import { isAskUserPayload, buildQuestionKeyboard } from '../features/question-helpers.js';
+import { tryGetBotForAccount } from '../bot-instance.js';
 
 /** 失败兜底文案（对齐 telegram：Something went wrong while processing your request.） */
 const FAILURE_FALLBACK_TEXT = 'Something went wrong while processing your request. Please try again.';
@@ -71,6 +73,11 @@ export async function dispatchToOpenClaw(
 
   const cfg = adapters.getConfig?.() ?? {};
 
+  const isGroup = envelope.chatScope === 'group';
+
+  // 群聊/私聊差异化 sessionKey：
+  // - 群聊：使用 group:{groupId}:coalescing 后缀，表明消息已经过合并处理
+  // - 私聊：保持原有格式，允许用户"插嘴"（新消息取消旧消息）
   const peerId = envelope.chatScope === 'group' 
     ? (envelope.groupId ?? envelope.senderId) 
     : envelope.senderId;
@@ -83,7 +90,12 @@ export async function dispatchToOpenClaw(
       kind: envelope.chatScope === 'group' ? 'group' : 'direct',
       id: peerId,
     },
-  }) ?? { sessionKey: `qqbot:${account.accountId}:${peerId}`, accountId: account.accountId };
+  }) ?? { 
+    sessionKey: isGroup 
+      ? `qqbot:${account.accountId}:group:${peerId}:coalescing`
+      : `qqbot:${account.accountId}:${peerId}`, 
+    accountId: account.accountId 
+  };
 
   const qualifiedTarget = envelope.targetId;
   const agentId = route.agentId ?? 'default';
@@ -173,6 +185,31 @@ export async function dispatchToOpenClaw(
       const hasMedia = !!(payload.mediaUrl || payload.mediaUrls?.length);
       dlog?.debug(`deliver kind=${kind ?? 'none'} textLen=${text.length} voice=${!!payload.audioAsVoice} media=${hasMedia}`);
 
+      // ── 0. ask_user 按钮投递（优先于所有其他处理）──
+      // 单问题单选场景：用 inline keyboard 替代纯文本
+      const payloadWithChannelData = payload as DeliverPayload & { channelData?: unknown };
+      if (isAskUserPayload(payloadWithChannelData as any) && text) {
+        const { questionId, optionValues } = (payloadWithChannelData as any).channelData.askUser;
+        const keyboard = buildQuestionKeyboard(questionId, optionValues);
+        const bot = tryGetBotForAccount(account.accountId);
+        if (bot) {
+          const replyTarget = {
+            scope: envelope.chatScope === 'group' ? 'group' as const : 'c2c' as const,
+            targetId: peerId,
+          };
+          try {
+            await bot.sendTextWithKeyboard(replyTarget, text, keyboard as never);
+            outboundSendOk++;
+            dlog?.debug(`[question] sent ask_user with keyboard questionId=${questionId} options=${optionValues.length}`);
+            return;
+          } catch (err) {
+            outboundSendFail++;
+            dlog?.error(`[question] sendTextWithKeyboard failed: ${err instanceof Error ? err.message : String(err)}`);
+            // fallback 到纯文本发送
+          }
+        }
+      }
+
       // ── 1. block: 媒体/语音立即发送，文本留给流式 ──
       // 注：static 模式已显式 disableBlockStreaming:true，kind:'block' 不会再触发；
       // 此分支保留以兼容 stream 模式与未来变化。
@@ -224,26 +261,36 @@ export async function dispatchToOpenClaw(
     }
   };
 
-  // Turn adoption lifecycle（对齐 telegram）：
-  // - abortSignal：排队中的 turn 被新消息取代（superseded）时，框架中止旧 turn；
-  //   与请求级 ctx.signal 合并后作为 agent run 的 AbortSignal。
-  // - onAdopted/onDeferred/onAbandoned：无 spool 场景下仅做可观测性日志。
+  // Turn adoption lifecycle（群聊/私聊差异化）：
+  // - 私聊：exclusive 模式，新消息取消旧消息（用户可"插嘴"）
+  // - 群聊：cancel-only 模式，不取消正在处理的任务（消息已由中间件合并）
+  // - abortSignal：仅私聊时传递，用于取消正在处理的任务
   const turnAbort = new AbortController();
+  const admission = isGroup ? 'cancel-only' as const : 'exclusive' as const;
+  
   const turnAdoptionLifecycle = {
-    admission: 'exclusive' as const,
-    abortSignal: turnAbort.signal,
+    admission,
+    abortSignal: admission === 'exclusive' ? turnAbort.signal : undefined,
     onAdopted: () => {
-      dlog?.debug(`turn adopted sessionKey=${route.sessionKey}`);
+      dlog?.debug(`turn adopted (${admission}) sessionKey=${route.sessionKey}`);
     },
     onDeferred: () => {
-      dlog?.debug(`turn deferred behind active turn sessionKey=${route.sessionKey}`);
+      if (admission === 'exclusive') {
+        dlog?.debug(`turn deferred behind active turn sessionKey=${route.sessionKey}`);
+      }
     },
     onAbandoned: () => {
-      dlog?.info(`turn abandoned (superseded) — aborting sessionKey=${route.sessionKey}`);
-      turnAbort.abort();
+      if (admission === 'exclusive') {
+        dlog?.info(`turn abandoned (superseded) — aborting sessionKey=${route.sessionKey}`);
+        turnAbort.abort();
+      } else {
+        dlog?.debug(`turn cancelled but continuing sessionKey=${route.sessionKey}`);
+      }
     },
   };
-  const combinedAbortSignal = combineAbortSignals(ctx.signal, turnAbort.signal);
+  const combinedAbortSignal = admission === 'exclusive' 
+    ? combineAbortSignals(ctx.signal, turnAbort.signal)
+    : ctx.signal;
 
   let dispatchError: unknown;
   const hadDispatchError = () => dispatchError !== undefined;

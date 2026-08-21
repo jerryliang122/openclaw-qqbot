@@ -4,11 +4,10 @@
  * 根据账户配置组装 SDK 内置中间件链。
  * 中间件负责过滤和上下文富化。
  * 
- * 并发控制说明：
- * - 已移除插件级的 concurrencyGuard 中间件
- * - 依赖 OpenClaw 框架的 session lane 机制实现并发控制
- * - 框架会自动按 sessionKey（qqbot:accountId:openid）串行处理同一会话的消息
- * - 这样与 Telegram 等其他 channel 保持一致，避免双重串行
+ * 并发控制说明（群聊/私聊差异化）：
+ * - 群聊：使用消息合并中间件，所有消息都应该被处理，快速消息应该被合并
+ * - 私聊：依赖 OpenClaw 框架的 session lane 机制，用户可以"插嘴"（新消息取消旧消息）
+ * - 这样与 Telegram 等其他 channel 保持一致
  */
 import type { QQBot, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import {
@@ -32,6 +31,8 @@ import { getHistoryStore, historyGroupKey } from '../features/history-store.js';
 import { dynamicAccessControl } from '../middleware/access-control.js';
 import { c2cTypingIndicator } from '../middleware/typing.js';
 import { stripMentionText } from '../utils/mention.js';
+import { groupMessageCoalescer } from '../features/message-coalescer.js';
+import { resolveGroupCoalesceEnabled, resolveGroupCoalesceMaxBuffer } from '../config.js';
 
 export interface MiddlewareSetupOptions {
   /** 获取 runtime */
@@ -86,7 +87,43 @@ export function setupMiddlewares(bot: QQBot, account: ResolvedQQBotAccount, opts
   const slash = slashCommand({ commands: buildCommandList(account, { getRuntime: opts.getRuntime }) });
   bot.use(slash.middleware);
 
-  // 10. C2C 输入状态指示器（配额感知：优先占被动回复配额，耗尽后与回复
+  // 10. 群聊消息合并中间件
+  //     - 群聊：所有消息都应该被处理，快速消息应该被合并
+  //     - 私聊：用户可以"插嘴"，新消息取消旧消息（由框架 session lane 处理）
+  //     - 放在斜杠命令之后、副作用中间件之前
+  //     - 从 ctx.state.policy.group 读取配置（由 policyInjector 注入）
+  const coalescerEnabled = account.config?.groupCoalesce?.enabled ?? true;
+  if (coalescerEnabled) {
+    bot.use(groupMessageCoalescer({
+      maxBuffer: account.config?.groupCoalesce?.maxBuffer ?? 50,
+      onCoalesce: (buffered) => {
+        if (buffered.length === 1) {
+          return buffered[0]!;
+        }
+        
+        const last = buffered[buffered.length - 1]!;
+        
+        // 合并附件
+        const attachments = buffered.flatMap((c) => c.message.attachments ?? []);
+        if (attachments.length > 0) {
+          last.message.attachments = attachments;
+        }
+        
+        // 透传原始消息列表，供 assembleBody 使用
+        last.state.mergedMessages = buffered;
+        
+        // 清除 assembledBody，让下游重新构建
+        delete last.state.assembledBody;
+        
+        return last;
+      },
+      onBufferFull: (ctx) => {
+        ctx.log.warn?.(`[coalescer] buffer full for group ${ctx.message.groupOpenid}`);
+      },
+    }));
+  }
+
+  // 11. C2C 输入状态指示器（配额感知：优先占被动回复配额，耗尽后与回复
   //     消息一样降级为主动发送；续期间隔默认 20s 且不低于 20s，
   //     详见 src/middleware/typing.ts）
   const typingCfg = account.config.typing;
@@ -97,15 +134,15 @@ export function setupMiddlewares(bot: QQBot, account: ResolvedQQBotAccount, opts
     }));
   }
 
-  // 11. 引用消息解析（默认优先 msg_elements 获取文件名等丰富信息）
+  // 12. 引用消息解析（默认优先 msg_elements 获取文件名等丰富信息）
   bot.use(quoteRef({
     store: getPersistedRefIndexStore(account.accountId),
   }));
 
-  // 12. 附件处理（语音 STT 转录 + 图片/文件下载）
+  // 13. 附件处理（语音 STT 转录 + 图片/文件下载）
   bot.use(attachmentProcessor({ getRuntime: opts.getRuntime }));
 
-  // 13. 上下文组装（构建框架规约的 body）
+  // 14. 上下文组装（构建框架规约的 body）
   bot.use(envelopeFormatter({
     format: (ctx) => {
       const assembled = assembleBody(ctx, ctx.message as never, account, opts.getRuntime);

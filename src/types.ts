@@ -45,6 +45,14 @@ export type GroupPolicy = "open" | "allowlist" | "disabled";
 /** 工具策略：full=全部 | restricted=限制敏感工具 | none=禁止 */
 export type ToolPolicy = "full" | "restricted" | "none";
 
+/** 群消息合并配置 */
+export interface GroupCoalesceConfig {
+  /** 是否启用消息合并（默认 true） */
+  enabled?: boolean;
+  /** 最大缓冲消息数（默认 50） */
+  maxBuffer?: number;
+}
+
 /** 单个群的配置 */
 export interface GroupConfig {
   /** 是否需要 @机器人才响应（默认 true） */
@@ -62,6 +70,8 @@ export interface GroupConfig {
   prompt?: string;
   /** 群历史消息缓存条数（0 禁用，默认 20） */
   historyLimit?: number;
+  /** 群消息合并配置（覆盖账号级配置） */
+  coalesce?: GroupCoalesceConfig;
 }
 
 /** 消息接收传输方式 */
@@ -138,6 +148,12 @@ export interface QQBotAccountConfig {
    * 设为 false 时，所有群默认无需 @ 即触发回复（仍可被群级配置覆盖）
    */
   defaultRequireMention?: boolean;
+  /**
+   * 群消息合并配置（账号级）
+   * 启用后，群聊中快速发送的多条消息会被合并处理，而不是取消之前的任务
+   * 与私聊的"插嘴"行为相反，群聊中所有消息都应该被处理
+   */
+  groupCoalesce?: GroupCoalesceConfig;
   /**
    * 出站消息合并回复（debounce）配置
    * 当短时间内收到多次 deliver 时，将文本合并为一条消息发送，避免消息轰炸
