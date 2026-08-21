@@ -221,6 +221,8 @@ async function handleQuestion(
   const parsed = parseQuestionButtonData(buttonData);
   if (!parsed) return;
 
+  // 无授权检查：ask_user 问题面向所有参与者（与审批不同，question 不是安全敏感操作）。
+  // 框架侧 questionGatewayRuntime.resolveOption 已处理过期/重复提交等边界情况。
   const operatorId = resolveOperatorId(event);
   const cfg = getAdapters(runtime).getConfig?.() ?? {};
 

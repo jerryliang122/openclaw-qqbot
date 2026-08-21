@@ -104,6 +104,20 @@ test('optionValues 非数组 -> false', () => {
   );
 });
 
+test('optionValues 含非字符串元素 -> false', () => {
+  assert.equal(
+    isAskUserPayload({
+      channelData: {
+        askUser: {
+          questionId: 'ask_0123456789abcdef0123456789abcdef',
+          optionValues: ['A', 123 as any],
+        },
+      },
+    }),
+    false,
+  );
+});
+
 console.log('\n=== 2. buildQuestionKeyboard ===');
 
 test('构建 2 个按钮', () => {
@@ -187,6 +201,13 @@ test('optionIndex 超出范围 -> null', () => {
 test('optionIndex 为负数 -> null', () => {
   assert.equal(
     parseQuestionButtonData('qqbot:q:ask_0123456789abcdef0123456789abcdef:-1'),
+    null,
+  );
+});
+
+test('button_data 以 : 结尾（空 indexStr）-> null', () => {
+  assert.equal(
+    parseQuestionButtonData('qqbot:q:ask_0123456789abcdef0123456789abcdef:'),
     null,
   );
 });
