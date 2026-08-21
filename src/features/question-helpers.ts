@@ -104,6 +104,7 @@ export function parseQuestionButtonData(buttonData: string): ParsedQuestionActio
   const indexStr = payload.slice(sepIndex + 1);
 
   if (!QUESTION_ID_PATTERN.test(questionId)) return null;
+  if (!indexStr) return null; // 防止 'qqbot:q:ask_xxx:' 被解析为 index 0
 
   const optionIndex = Number(indexStr);
   if (!Number.isInteger(optionIndex) || optionIndex < 0 || optionIndex > 3) return null;
