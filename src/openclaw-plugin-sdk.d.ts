@@ -668,6 +668,26 @@ declare module "openclaw/plugin-sdk" {
   export function normalizeAccountId(accountId: string | undefined | null): string;
 }
 
+declare module "openclaw/plugin-sdk/question-gateway-runtime" {
+  export const questionGatewayRuntime: {
+    resolveOption: (params: {
+      cfg: unknown;
+      questionId: string;
+      optionIndex: number;
+      senderId?: string;
+      gatewayUrl?: string;
+      clientDisplayName?: string;
+    }) => Promise<{ status: string }>;
+    resolveReactionIndex: (...args: unknown[]) => unknown;
+    resolveReaction: (...args: unknown[]) => unknown;
+    registerChannelDelivery: (...args: unknown[]) => unknown;
+    readAskUserQuestionId: (...args: unknown[]) => unknown;
+    reactionEmojis: readonly string[];
+    prepareReactionPayloadForDelivery: (...args: unknown[]) => unknown;
+    readReactionBinding: (...args: unknown[]) => unknown;
+  };
+}
+
 declare module "openclaw/plugin-sdk/setup" {
   export interface ChannelSetupWizardStatus {
     channelLabel: string;
