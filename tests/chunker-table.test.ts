@@ -8,56 +8,19 @@
  */
 
 import assert from "node:assert";
+import { chunkMarkdownPreservingTables } from "../src/outbound/chunker.js";
 
 let passed = 0;
 let failed = 0;
 const failedTests: string[] = [];
 
-// ── 内联 chunker 实现（与 src/channel.ts fallback 保持一致）──
+// ── 直接引用 src 实现，保证测试守护真实代码（而非内联副本）──
 
-const GFM_TABLE_DATA_RE = /^\|.+\|.*\|/;
+/** GFM 表格分隔行: |---|:---:|---| */
 const GFM_TABLE_SEP_RE = /^\|[\s:-]+\|/;
 
-function isGfmTableLine(line: string): boolean {
-  return GFM_TABLE_DATA_RE.test(line) || GFM_TABLE_SEP_RE.test(line);
-}
-
 function chunkText(text: string, limit: number): string[] {
-  const lines = text.split('\n');
-  const chunks: string[] = [];
-  let current = '';
-  let tableBuffer: string[] = [];
-
-  const flushTable = () => {
-    if (tableBuffer.length === 0) return;
-    const tableBlock = tableBuffer.join('\n');
-    const candidate = current ? `${current}\n${tableBlock}` : tableBlock;
-    if (candidate.length > limit && current) {
-      chunks.push(current);
-      current = tableBlock;
-    } else {
-      current = candidate;
-    }
-    tableBuffer = [];
-  };
-
-  for (const line of lines) {
-    if (isGfmTableLine(line)) {
-      tableBuffer.push(line);
-      continue;
-    }
-    flushTable();
-    const candidate = current ? `${current}\n${line}` : line;
-    if (candidate.length > limit && current) {
-      chunks.push(current);
-      current = line;
-    } else {
-      current = candidate;
-    }
-  }
-  flushTable();
-  if (current) chunks.push(current);
-  return chunks.length > 0 ? chunks : [text];
+  return chunkMarkdownPreservingTables(text, limit);
 }
 
 // ── 测试辅助 ──
