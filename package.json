@@ -6,6 +6,12 @@
   "type": "module",
   "main": "dist/index.cjs",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
   "bin": {
     "openclaw-qqbot": "./bin/qqbot-cli.js",
     "qqbot": "./bin/qqbot-cli.js"
