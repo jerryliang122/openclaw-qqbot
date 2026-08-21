@@ -24,6 +24,8 @@ import { DeliverDebouncer } from '../outbound/debounce.js';
 import { StreamingController, shouldUseStreaming } from '../outbound/streaming-controller.js';
 import { getAdapters } from '../adapter/resolve.js';
 import { clearGroupHistory } from '../features/history-store.js';
+import { isAskUserPayload, buildQuestionKeyboard } from '../features/question-helpers.js';
+import { tryGetBotForAccount } from '../bot-instance.js';
 
 /** 失败兜底文案（对齐 telegram：Something went wrong while processing your request.） */
 const FAILURE_FALLBACK_TEXT = 'Something went wrong while processing your request. Please try again.';
@@ -182,6 +184,31 @@ export async function dispatchToOpenClaw(
       const text = payload.text?.trim() ?? '';
       const hasMedia = !!(payload.mediaUrl || payload.mediaUrls?.length);
       dlog?.debug(`deliver kind=${kind ?? 'none'} textLen=${text.length} voice=${!!payload.audioAsVoice} media=${hasMedia}`);
+
+      // ── 0. ask_user 按钮投递（优先于所有其他处理）──
+      // 单问题单选场景：用 inline keyboard 替代纯文本
+      const payloadWithChannelData = payload as DeliverPayload & { channelData?: unknown };
+      if (isAskUserPayload(payloadWithChannelData as any) && text) {
+        const { questionId, optionValues } = (payloadWithChannelData as any).channelData.askUser;
+        const keyboard = buildQuestionKeyboard(questionId, optionValues);
+        const bot = tryGetBotForAccount(account.accountId);
+        if (bot) {
+          const replyTarget = {
+            scope: envelope.chatScope === 'group' ? 'group' as const : 'c2c' as const,
+            targetId: peerId,
+          };
+          try {
+            await bot.sendTextWithKeyboard(replyTarget, text, keyboard as never);
+            outboundSendOk++;
+            dlog?.debug(`[question] sent ask_user with keyboard questionId=${questionId} options=${optionValues.length}`);
+            return;
+          } catch (err) {
+            outboundSendFail++;
+            dlog?.error(`[question] sendTextWithKeyboard failed: ${err instanceof Error ? err.message : String(err)}`);
+            // fallback 到纯文本发送
+          }
+        }
+      }
 
       // ── 1. block: 媒体/语音立即发送，文本留给流式 ──
       // 注：static 模式已显式 disableBlockStreaming:true，kind:'block' 不会再触发；
