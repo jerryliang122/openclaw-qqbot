@@ -213,7 +213,7 @@ export class StreamingController {
         // 未提供 sendStatic → 降级标记，由上层兜底发送
         this.transition('failed', 'finalize:no_sendstatic');
       } else {
-        this.transition('failed', 'finalize:fallback');
+        this.transition('done', 'finalize:fallback');
       }
       return;
     }
@@ -230,7 +230,7 @@ export class StreamingController {
     if (this.sentChunkCount > 0) {
       this.transition('done', 'finalize:no_session');
     } else {
-      this.transition('failed', 'finalize:fallback');
+      this.transition('done', 'finalize:fallback');
     }
   }
 

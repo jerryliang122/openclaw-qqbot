@@ -127,7 +127,7 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
 };
 
 // ---- 现在 import StreamingController（它会使用被 mock 的 global.fetch） ----
-const { StreamingController } = await import("../src/streaming.js");
+const { StreamingController } = await import("../src/outbound/streaming-controller.js");
 type StreamingControllerType = InstanceType<typeof StreamingController>;
 
 // ============ 辅助函数 ============
