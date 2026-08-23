@@ -209,6 +209,22 @@ function normalizeAppId(raw: unknown): string {
   return String(raw).trim();
 }
 
+function firstNonEmptyEnv(...values: Array<string | undefined>): string {
+  for (const value of values) {
+    if (value?.trim()) return value.trim();
+  }
+  return "";
+}
+
+/** 文档变量名优先，同时兼容旧的下划线变量名。 */
+export function resolveQQBotEnvAppId(): string {
+  return firstNonEmptyEnv(process.env.QQBOT_APPID, process.env.QQBOT_APP_ID);
+}
+
+export function resolveQQBotEnvClientSecret(): string {
+  return firstNonEmptyEnv(process.env.QQBOT_SECRET, process.env.QQBOT_CLIENT_SECRET);
+}
+
 /**
  * 列出所有 QQBot 账户 ID
  */
@@ -216,7 +232,7 @@ export function listQQBotAccountIds(cfg: OpenClawConfig): string[] {
   const ids = new Set<string>();
   const qqbot = cfg.channels?.qqbot as QQBotChannelConfig | undefined;
 
-  if (qqbot?.appId) {
+  if (qqbot?.appId || resolveQQBotEnvAppId()) {
     ids.add(DEFAULT_ACCOUNT_ID);
   }
 
@@ -237,7 +253,7 @@ export function listQQBotAccountIds(cfg: OpenClawConfig): string[] {
 export function resolveDefaultQQBotAccountId(cfg: OpenClawConfig): string {
   const qqbot = cfg.channels?.qqbot as QQBotChannelConfig | undefined;
   // 如果有默认账户配置，返回 default
-  if (qqbot?.appId) {
+  if (qqbot?.appId || resolveQQBotEnvAppId()) {
     return DEFAULT_ACCOUNT_ID;
   }
   // 否则返回第一个配置的账户
@@ -307,14 +323,14 @@ export function resolveQQBotAccount(
   } else if (accountConfig.clientSecretFile) {
     // 从文件读取（运行时处理）
     secretSource = "file";
-  } else if (process.env.QQBOT_CLIENT_SECRET && resolvedAccountId === DEFAULT_ACCOUNT_ID) {
-    clientSecret = process.env.QQBOT_CLIENT_SECRET;
+  } else if (resolvedAccountId === DEFAULT_ACCOUNT_ID && resolveQQBotEnvClientSecret()) {
+    clientSecret = resolveQQBotEnvClientSecret();
     secretSource = "env";
   }
 
   // AppId 也可以从环境变量读取
-  if (!appId && process.env.QQBOT_APP_ID && resolvedAccountId === DEFAULT_ACCOUNT_ID) {
-    appId = normalizeAppId(process.env.QQBOT_APP_ID);
+  if (!appId && resolvedAccountId === DEFAULT_ACCOUNT_ID) {
+    appId = normalizeAppId(resolveQQBotEnvAppId());
   }
 
   return {

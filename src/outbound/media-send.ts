@@ -22,6 +22,7 @@ import type { PluginLogger } from '../utils/plugin-logger.js';
 import { validateRemoteUrl } from '../utils/ssrf-guard.js';
 import { getGateway } from './outbound-service.js';
 import { parseTarget } from './target.js';
+import { checkAndConsumePassiveReplyQuota } from '../features/quota-manager.js';
 import {
   isLocalFilePath,
   isDataUrl,
@@ -53,6 +54,8 @@ export interface SendMediaParams {
   log?: PluginLogger;
   /** Agent ID（用于解析相对路径的工作区） */
   agentId?: string;
+  /** 上层已原子预留配额；防止同一发送重复计数。 */
+  quotaReserved?: boolean;
 }
 
 export interface SendMediaResult {
@@ -163,18 +166,38 @@ export async function sendMedia(params: SendMediaParams): Promise<SendMediaResul
 
   const target = parseTarget(params.to);
 
+  const reservation = params.quotaReserved || !params.replyToId
+    ? { canReply: Boolean(params.replyToId), rollback: () => {} }
+    : checkAndConsumePassiveReplyQuota({
+        accountId,
+        msgId: params.replyToId,
+        scope: target.scope,
+        log,
+      });
+  const sendParams: SendMediaParams = {
+    ...params,
+    replyToId: reservation.canReply ? params.replyToId : undefined,
+  };
+
   // 4. 路由分发
+  let result: SendMediaResult;
   switch (kind) {
     case 'voice':
-      return sendVoiceMedia(gw, target, resolved.path, params);
+      result = await sendVoiceMedia(gw, target, resolved.path, sendParams);
+      break;
     case 'video':
-      return sendVideoMedia(gw, target, resolved.path, params);
+      result = await sendVideoMedia(gw, target, resolved.path, sendParams);
+      break;
     case 'file':
-      return sendFileMedia(gw, target, resolved.path, params);
+      result = await sendFileMedia(gw, target, resolved.path, sendParams);
+      break;
     case 'image':
     default:
-      return sendImageMedia(gw, target, resolved.path, params);
+      result = await sendImageMedia(gw, target, resolved.path, sendParams);
+      break;
   }
+  if (result.error) reservation.rollback();
+  return result;
 }
 
 // ── 路径安全校验 ──
@@ -217,13 +240,21 @@ async function resolveMediaPath(source: string, log?: SendMediaParams['log'], wo
   if (!isLocalFilePath(normalized)) {
     const resolved = resolveWorkingFile(normalized, workspaceDir);
     if (resolved) {
-      return { ok: true, path: resolved, isLocal: true };
+      return resolveAllowedLocalPath(resolved, workspaceDir, log);
     }
     return { ok: true, path: normalized, isLocal: false };
   }
 
-  // 本地路径 → 安全校验
-  const resolved = path.resolve(normalized);
+  return resolveAllowedLocalPath(normalized, workspaceDir, log);
+}
+
+/** 所有本地路径（包括纯文件名兜底）统一经过 realpath + 根目录白名单校验。 */
+function resolveAllowedLocalPath(
+  source: string,
+  workspaceDir?: string,
+  log?: SendMediaParams['log'],
+): ResolveResult | ResolveError {
+  const resolved = path.resolve(source);
   if (!fs.existsSync(resolved)) {
     return { ok: false, error: `File not found: ${resolved}` };
   }

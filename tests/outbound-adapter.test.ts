@@ -320,6 +320,34 @@ async function main() {
     assert(capturedAccountId === mockAccount.accountId, 'Should fallback to account.accountId when accountId not provided');
   });
 
+  await test('默认发送链路只计数一次且群聊允许 5 次被动回复', async () => {
+    const { registerGateway, unregisterGateway } = await import('../src/outbound/outbound-service.js');
+    clearQuotaCache();
+    const sentMsgIds: Array<string | undefined> = [];
+    registerGateway(mockAccount.accountId, {
+      sendText: async (_target: unknown, _text: string, opts: { msgId?: string }) => {
+        sentMsgIds.push(opts.msgId);
+        return { id: `sent-${sentMsgIds.length}` };
+      },
+    } as any);
+
+    try {
+      const adapter = createQQBotOutboundAdapter({});
+      for (let i = 0; i < 6; i++) {
+        await adapter.sendTextWithQuota({
+          to: 'qqbot:group:group-quota',
+          text: `group message ${i + 1}`,
+          replyToId: 'group-source-msg',
+          account: mockAccount,
+        });
+      }
+      assert.deepEqual(sentMsgIds.slice(0, 5), Array(5).fill('group-source-msg'));
+      assert.equal(sentMsgIds[5], undefined, '第 6 次才应降级为主动消息');
+    } finally {
+      unregisterGateway(mockAccount.accountId);
+    }
+  });
+
   console.log('All outbound adapter tests passed');
 }
 

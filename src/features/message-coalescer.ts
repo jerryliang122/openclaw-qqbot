@@ -16,11 +16,17 @@
  */
 import type { Middleware, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 
+interface BufferedMessage {
+  ctx: MiddlewareContext;
+  next: () => Promise<unknown>;
+  resolve: () => void;
+  reject: (reason: unknown) => void;
+}
+
 interface GroupCoalescerState {
   busy: boolean;
   activeCtx?: MiddlewareContext;
-  buffer: MiddlewareContext[];
-  resolve?: () => void;
+  buffer: BufferedMessage[];
 }
 
 const groupCoalescers = new Map<string, GroupCoalescerState>();
@@ -28,10 +34,16 @@ const groupCoalescers = new Map<string, GroupCoalescerState>();
 const DEFAULT_MAX_BUFFER_SIZE = 50;
 
 export interface GroupCoalescerOptions {
+  /** 账户 ID；用于隔离不同 bot 下可能重复的 groupOpenid。 */
+  accountId?: string;
+
   /**
    * 最大缓冲消息数，默认 50
    */
-  maxBuffer?: number;
+  maxBuffer?: number | ((ctx: MiddlewareContext) => number);
+
+  /** 按群动态决定是否启用合并。 */
+  isEnabled?: (ctx: MiddlewareContext) => boolean;
 
   /**
    * 合并回调函数
@@ -50,18 +62,24 @@ export interface GroupCoalescerOptions {
  * 创建群聊消息合并中间件
  */
 export function groupMessageCoalescer(options: GroupCoalescerOptions): Middleware {
-  const { maxBuffer = DEFAULT_MAX_BUFFER_SIZE, onCoalesce, onBufferFull } = options;
+  const {
+    accountId = 'default',
+    maxBuffer = DEFAULT_MAX_BUFFER_SIZE,
+    isEnabled = () => true,
+    onCoalesce,
+    onBufferFull,
+  } = options;
 
   return async (ctx, next) => {
     const msg = ctx.message;
 
     // 只处理群聊消息
-    if (msg.kind !== 'group') {
+    if (msg.kind !== 'group' || !isEnabled(ctx)) {
       await next();
       return;
     }
 
-    const groupKey = `group:${msg.groupOpenid}`;
+    const groupKey = `${accountId}:group:${msg.groupOpenid}`;
     let state = groupCoalescers.get(groupKey);
 
     if (!state) {
@@ -76,47 +94,49 @@ export function groupMessageCoalescer(options: GroupCoalescerOptions): Middlewar
 
       try {
         await next();
+        // 保持 busy=true 逐批排空；处理 survivor 期间到达的消息进入下一批。
+        while (state.buffer.length > 0) {
+          const batch = state.buffer.splice(0);
+          const buffered = batch.map((entry) => entry.ctx);
+
+          try {
+            for (const bufferedCtx of buffered) {
+              bufferedCtx.state.coalesced = true;
+              bufferedCtx.state.mergedMessages = buffered;
+            }
+
+            const selected = onCoalesce(buffered);
+            const survivorEntry = batch.find((entry) => entry.ctx === selected) ?? batch.at(-1)!;
+            const survivor = survivorEntry.ctx;
+            delete survivor.state.assembledBody;
+            survivor.state.isSurvivor = true;
+
+            await survivorEntry.next();
+            for (const entry of batch) entry.resolve();
+          } catch (err) {
+            for (const entry of batch) entry.reject(err);
+            throw err;
+          }
+        }
+      } catch (err) {
+        // 当前处理失败时也必须释放所有等待者，不能留下永久挂起的 Promise。
+        for (const entry of state.buffer.splice(0)) entry.reject(err);
+        throw err;
       } finally {
-        // 当前消息处理完成，检查是否有缓冲的消息
         state.busy = false;
         state.activeCtx = undefined;
-
-        if (state.buffer.length > 0) {
-          // 合并缓冲的消息（包含当前刚完成的消息）
-          const buffered = state.buffer.splice(0);
-          
-          // 标记所有缓冲消息为已处理
-          for (const bufferedCtx of buffered) {
-            bufferedCtx.state.coalesced = true;
-          }
-          
-          // 选择 survivor 并合并
-          const survivor = onCoalesce(buffered);
-          
-          // 清除 assembledBody，让下游重新构建
-          delete survivor.state.assembledBody;
-          
-          // 标记为 survivor
-          survivor.state.isSurvivor = true;
-          
-          // 解析 resolve，让 survivor 继续处理
-          if (state.resolve) {
-            state.resolve();
-            state.resolve = undefined;
-          }
-        }
-
-        // 清理状态
-        if (state.buffer.length === 0) {
-          groupCoalescers.delete(groupKey);
-        }
+        if (groupCoalescers.get(groupKey) === state) groupCoalescers.delete(groupKey);
       }
       return;
     }
 
     // 有正在处理的消息 → 缓冲当前消息
-    if (state.buffer.length >= maxBuffer) {
-      ctx.log.debug?.(`[coalescer] buffer full (${maxBuffer}), drop for ${groupKey}`);
+    const resolvedMaxBuffer = Math.max(
+      0,
+      Math.floor(typeof maxBuffer === 'function' ? maxBuffer(ctx) : maxBuffer),
+    );
+    if (state.buffer.length >= resolvedMaxBuffer) {
+      ctx.log.debug?.(`[coalescer] buffer full (${resolvedMaxBuffer}), drop for ${groupKey}`);
       await onBufferFull?.(ctx);
       ctx.stop('coalescer:buffer-full');
       return;
@@ -126,20 +146,10 @@ export function groupMessageCoalescer(options: GroupCoalescerOptions): Middlewar
       `[coalescer] buffered: ${groupKey} (msgId=${ctx.message.messageId} pos=${state.buffer.length + 1})`,
     );
 
-    state.buffer.push(ctx);
-
-    // 等待当前任务完成
-    await new Promise<void>((resolve) => {
-      state!.resolve = resolve;
+    // 每条消息保存独立 resolver；worker 会调用 survivor 的 next 并释放整批。
+    await new Promise<void>((resolve, reject) => {
+      state!.buffer.push({ ctx, next, resolve, reject });
     });
-
-    // 不是 survivor，直接返回
-    if (!ctx.state.isSurvivor) {
-      return;
-    }
-
-    // survivor 继续处理
-    await next();
   };
 }
 
@@ -147,6 +157,9 @@ export function groupMessageCoalescer(options: GroupCoalescerOptions): Middlewar
  * 清理所有群聊合并状态（用于测试或重置）
  */
 export function clearAllCoalescers(): void {
+  for (const state of groupCoalescers.values()) {
+    for (const entry of state.buffer.splice(0)) entry.resolve();
+  }
   groupCoalescers.clear();
 }
 
@@ -154,5 +167,5 @@ export function clearAllCoalescers(): void {
  * 获取指定群的合并状态（用于调试）
  */
 export function getCoalescerState(groupOpenid: string): GroupCoalescerState | undefined {
-  return groupCoalescers.get(`group:${groupOpenid}`);
+  return groupCoalescers.get(`default:group:${groupOpenid}`);
 }

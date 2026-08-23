@@ -14,7 +14,7 @@ import { dispatchToOpenClaw } from '../dispatch/index.js';
 import { runWithRequestContext } from '../request-context.js';
 import { authorizeQQBotApprovalAction } from '../features/approval-capability.js';
 import { parseApprovalButtonData } from '../features/approval-helpers.js';
-import { parseQuestionButtonData } from '../features/question-helpers.js';
+import { getQuestionGatewayRuntime, parseQuestionButtonData } from '../features/question-helpers.js';
 import { recordKnownUser } from '../features/proactive.js';
 import { cacheMsgId } from '../features/msgid-cache.js';
 import { getAdapters } from '../adapter/resolve.js';
@@ -227,7 +227,10 @@ async function handleQuestion(
   const cfg = getAdapters(runtime).getConfig?.() ?? {};
 
   try {
-    const { questionGatewayRuntime } = await import('openclaw/plugin-sdk/question-gateway-runtime');
+    const questionGatewayRuntime = await getQuestionGatewayRuntime();
+    if (!questionGatewayRuntime) {
+      throw new Error('OpenClaw host does not export question-gateway-runtime (requires 2026.8.1+)');
+    }
     const result = await questionGatewayRuntime.resolveOption({
       cfg,
       questionId: parsed.questionId,
