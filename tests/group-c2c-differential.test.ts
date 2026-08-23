@@ -216,7 +216,6 @@ async function main(): Promise<void> {
     clearAllCoalescers();
     
     const messages: any[] = [];
-    let processingCount = 0;
     let resolveProcessing: () => void;
     
     const middleware = groupMessageCoalescer({
@@ -279,11 +278,14 @@ async function main(): Promise<void> {
     } as any;
     
     let secondNextCalled = false;
+    let thirdNextCalled = false;
     const promise2 = middleware(ctx2, async () => {
       secondNextCalled = true;
     });
     
-    const promise3 = middleware(ctx3, async () => {});
+    const promise3 = middleware(ctx3, async () => {
+      thirdNextCalled = true;
+    });
     
     // 第一条消息完成处理
     resolveProcessing!();
@@ -294,7 +296,8 @@ async function main(): Promise<void> {
     
     // 验证：第一条消息单独处理，第二和第三条消息合并处理
     assert.ok(firstNextCalled, '第一条消息应该被处理');
-    assert.ok(secondNextCalled, '合并后的消息应该被处理');
+    assert.equal(secondNextCalled, false, '非 survivor 不应重复进入下游');
+    assert.ok(thirdNextCalled, '最后一条 survivor 应该被处理');
     assert.equal(messages.length, 1, '应该有一次合并');
     assert.deepEqual(messages[0], ['消息 2', '消息 3'], '第二和第三条消息应该被合并');
     

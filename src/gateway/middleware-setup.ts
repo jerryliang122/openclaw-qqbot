@@ -32,7 +32,7 @@ import { dynamicAccessControl } from '../middleware/access-control.js';
 import { c2cTypingIndicator } from '../middleware/typing.js';
 import { stripMentionText } from '../utils/mention.js';
 import { groupMessageCoalescer } from '../features/message-coalescer.js';
-import { resolveGroupCoalesceEnabled, resolveGroupCoalesceMaxBuffer } from '../config.js';
+import { resolveGroupConfigFromAccount } from '../config.js';
 
 export interface MiddlewareSetupOptions {
   /** 获取 runtime */
@@ -92,10 +92,20 @@ export function setupMiddlewares(bot: QQBot, account: ResolvedQQBotAccount, opts
   //     - 私聊：用户可以"插嘴"，新消息取消旧消息（由框架 session lane 处理）
   //     - 放在斜杠命令之后、副作用中间件之前
   //     - 从 ctx.state.policy.group 读取配置（由 policyInjector 注入）
-  const coalescerEnabled = account.config?.groupCoalesce?.enabled ?? true;
-  if (coalescerEnabled) {
-    bot.use(groupMessageCoalescer({
-      maxBuffer: account.config?.groupCoalesce?.maxBuffer ?? 50,
+  bot.use(groupMessageCoalescer({
+      accountId: account.accountId,
+      isEnabled: (ctx) => {
+        const groupOpenid = ctx.message.groupOpenid;
+        return groupOpenid
+          ? resolveGroupConfigFromAccount(account, groupOpenid).coalesce.enabled
+          : false;
+      },
+      maxBuffer: (ctx) => {
+        const groupOpenid = ctx.message.groupOpenid;
+        return groupOpenid
+          ? resolveGroupConfigFromAccount(account, groupOpenid).coalesce.maxBuffer
+          : 50;
+      },
       onCoalesce: (buffered) => {
         if (buffered.length === 1) {
           return buffered[0]!;
@@ -121,7 +131,6 @@ export function setupMiddlewares(bot: QQBot, account: ResolvedQQBotAccount, opts
         ctx.log.warn?.(`[coalescer] buffer full for group ${ctx.message.groupOpenid}`);
       },
     }));
-  }
 
   // 11. C2C 输入状态指示器（配额感知：优先占被动回复配额，耗尽后与回复
   //     消息一样降级为主动发送；续期间隔默认 20s 且不低于 20s，

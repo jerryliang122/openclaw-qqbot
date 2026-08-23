@@ -30,7 +30,7 @@ const QUOTA_LIMITS = {
  * 检查被动回复配额
  * @deprecated 建议使用 checkAndConsumePassiveReplyQuota 进行原子操作
  */
-export async function checkPassiveReplyQuota(params: QuotaCheckParams): Promise<boolean> {
+export function checkPassiveReplyQuota(params: QuotaCheckParams): boolean {
   const { accountId, msgId, scope } = params;
 
   if (!msgId) {
@@ -62,7 +62,7 @@ export async function checkPassiveReplyQuota(params: QuotaCheckParams): Promise<
  * 消耗被动回复配额
  * @deprecated 建议使用 checkAndConsumePassiveReplyQuota 进行原子操作
  */
-export async function consumePassiveReplyQuota(params: QuotaConsumeParams): Promise<void> {
+export function consumePassiveReplyQuota(params: QuotaConsumeParams): void {
   const { accountId, msgId, scope, log } = params;
   const key = `${accountId}:${scope}:${msgId}`;
   const now = Date.now();
@@ -110,9 +110,9 @@ export function rollbackPassiveReplyQuota(params: {
  * 原子操作：检查并消耗被动回复配额
  * 推荐使用此函数，避免 check-then-consume 竞态
  */
-export async function checkAndConsumePassiveReplyQuota(
+export function checkAndConsumePassiveReplyQuota(
   params: QuotaCheckParams & { log?: QuotaConsumeParams['log'] },
-): Promise<{ canReply: boolean; rollback: () => void }> {
+): { canReply: boolean; rollback: () => void } {
   const { accountId, msgId, scope, log } = params;
 
   if (!msgId) {
@@ -173,6 +173,13 @@ export function inferQQBotScope(to: string): 'c2c' | 'group' {
 
 export function clearQuotaCache(): void {
   quotaCache.clear();
+}
+
+export function clearQuotaCacheForAccount(accountId: string): void {
+  const prefix = `${accountId}:`;
+  for (const key of quotaCache.keys()) {
+    if (key.startsWith(prefix)) quotaCache.delete(key);
+  }
 }
 
 export function getQuotaStats(accountId: string, scope: 'c2c' | 'group'): {

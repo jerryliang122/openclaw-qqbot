@@ -9,6 +9,7 @@
  * 运行方式: npx tsx tests/additional-coverage.test.ts
  */
 import assert from 'node:assert';
+import path from 'node:path';
 
 let passed = 0;
 let failed = 0;
@@ -178,6 +179,46 @@ async function main(): Promise<void> {
     assert.equal(stats2.totalUsage, 0, '回滚后配额应该为 0');
     
     clearQuotaCache();
+  });
+
+  // 测试 6: 纯相对路径也必须经过本地文件白名单
+  await test('媒体相对路径不能用中间目录穿越白名单', async () => {
+    const { sendMedia } = await import('../src/outbound/media-send.js');
+    // 以普通目录名开头，绕过旧版 isLocalFilePath；规范化后指向允许根之外的 Node 可执行文件。
+    const traversal = `placeholder/../${path.relative(process.cwd(), process.execPath)}`;
+    const result = await sendMedia({
+      to: 'qqbot:c2c:test-user',
+      source: traversal,
+      accountId: 'missing-gateway',
+    });
+
+    assert.match(result.error ?? '', /不在允许的目录/);
+  });
+
+  // 测试 7: 文档公开的环境变量名必须可直接启动 default 账户
+  await test('QQBOT_APPID / QQBOT_SECRET 环境变量兼容', async () => {
+    const keys = ['QQBOT_APPID', 'QQBOT_SECRET', 'QQBOT_APP_ID', 'QQBOT_CLIENT_SECRET'] as const;
+    const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    try {
+      process.env.QQBOT_APPID = ' documented-app-id ';
+      process.env.QQBOT_SECRET = ' documented-secret ';
+      delete process.env.QQBOT_APP_ID;
+      delete process.env.QQBOT_CLIENT_SECRET;
+
+      const { listQQBotAccountIds, resolveQQBotAccount } = await import('../src/config.js');
+      const cfg = {} as any;
+      assert.deepEqual(listQQBotAccountIds(cfg), ['default']);
+      const account = resolveQQBotAccount(cfg, 'default');
+      assert.equal(account.appId, 'documented-app-id');
+      assert.equal(account.clientSecret, 'documented-secret');
+      assert.equal(account.secretSource, 'env');
+    } finally {
+      for (const key of keys) {
+        const value = previous[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   // ── 汇总 ──────────────────────────────────────────────────

@@ -5,7 +5,7 @@
 ## Commands
 
 ```bash
-npm run build        # tsup → dist/index.cjs + dist/index.d.ts (CJS only, target node18)
+npm run build        # tsup → dist/index.cjs + dist/index.d.cts (CJS only, target node18)
 npm run dev          # tsup --watch
 npm run typecheck    # tsc --noEmit (currently passes)
 npm run lint:runtime # BROKEN — references missing src/runtime-adapter/lint-runtime-access.ts

@@ -13,7 +13,7 @@
  *   "Channel is unavailable: qqbot"。
  */
 
-import { checkAndConsumePassiveReplyQuota, checkPassiveReplyQuota, rollbackPassiveReplyQuota, inferQQBotScope } from './features/quota-manager.js';
+import { checkAndConsumePassiveReplyQuota, checkPassiveReplyQuota, inferQQBotScope } from './features/quota-manager.js';
 import type { PluginLogger } from './utils/plugin-logger.js';
 import type { ResolvedQQBotAccount } from './types.js';
 import type { SendMediaParams, SendMediaResult } from './outbound/media-send.js';
@@ -33,6 +33,7 @@ export type SendTextFn = (params: {
   accountId?: string;
   replyToId?: string;
   account: ResolvedQQBotAccount;
+  quotaReserved?: boolean;
 }) => Promise<SendResult>;
 
 export type SendMediaFn = (params: SendMediaParams) => Promise<SendMediaResult>;
@@ -133,6 +134,7 @@ export function createQQBotOutboundAdapter(params: QQBotOutboundAdapterParams): 
         accountId: resolvedAccountId,
         replyToId: canReply ? replyToId : undefined,
         account,
+        quotaReserved: canReply,
       });
 
       // 发送失败时回滚配额
@@ -167,6 +169,7 @@ export function createQQBotOutboundAdapter(params: QQBotOutboundAdapterParams): 
         accountId: resolvedAccountId,
         agentId,
         log,
+        quotaReserved: canReply,
       });
 
       // 发送失败时回滚配额

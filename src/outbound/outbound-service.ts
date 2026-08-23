@@ -9,47 +9,57 @@ import { MediaFileType } from '@tencent-connect/qqbot-nodejs';
 import type { QQBotGateway } from '../gateway/index.js';
 import type { ResolvedQQBotAccount } from '../types.js';
 import { parseTarget } from './target.js';
-import { ReplyLimiter } from './reply-limiter.js';
+import {
+  checkAndConsumePassiveReplyQuota,
+  clearQuotaCacheForAccount,
+  rollbackPassiveReplyQuota,
+} from '../features/quota-manager.js';
 
-// ── Gateway + Limiter 注册表（生命周期由 channel.ts 管理）──
+// ── Gateway 注册表（生命周期由 channel.ts 管理）──
 
 const gateways = new Map<string, QQBotGateway>();
-const limiters = new Map<string, ReplyLimiter>();
-
-function getLimiter(accountId: string): ReplyLimiter {
-  let l = limiters.get(accountId);
-  if (!l) {
-    l = new ReplyLimiter();
-    limiters.set(accountId, l);
-  }
-  return l;
-}
 
 /**
- * 解析 replyToId：超出被动回复限额时自动降级为主动消息（不传 msgId）。
- * @returns 实际使用的 msgId（超限时为 undefined）
+ * 为一次实际 API 调用预留被动回复配额。
+ * quotaReserved=true 表示上层 adapter 已经原子预留，避免同一发送重复计数。
  */
-function resolveMsgId(replyToId: string | undefined, accountId: string): string | undefined {
-  if (!replyToId) return undefined;
-  const limiter = getLimiter(accountId);
-  const result = limiter.checkLimit(replyToId);
-  if (!result.allowed) return undefined;
-  limiter.record(replyToId);
-  return replyToId;
+function reservePassiveReply(params: {
+  replyToId?: string;
+  accountId: string;
+  scope: 'c2c' | 'group';
+  quotaReserved?: boolean;
+}): { msgId?: string; rollback: () => void } {
+  if (!params.replyToId) return { rollback: () => {} };
+  if (params.quotaReserved) {
+    return { msgId: params.replyToId, rollback: () => {} };
+  }
+  const reservation = checkAndConsumePassiveReplyQuota({
+    accountId: params.accountId,
+    msgId: params.replyToId,
+    scope: params.scope,
+  });
+  return {
+    msgId: reservation.canReply ? params.replyToId : undefined,
+    rollback: reservation.canReply ? reservation.rollback : () => {},
+  };
 }
 
 /**
  * 尝试为 typing 指示器占用一个被动回复配额（带 msg_id 发送）。
  *
- * typing 通知与回复消息共享同一 msg_id 的被动回复配额，必须经同一
- * limiter 记账。配额不可用时调用方应降级为主动发送（不带 msg_id），
- * 与回复消息的降级策略（resolveMsgId）保持一致。
+ * typing 通知与回复消息共享同一 msg_id 的被动回复配额，必须经统一
+ * quota-manager 记账。配额不可用时调用方应降级为主动发送（不带 msg_id）。
  *
  * @returns 是否占得被动配额；false 表示应不带 msg_id 主动发送
  */
 export function tryAcquirePassiveSlot(accountId: string, msgId: string | undefined): boolean {
   if (!msgId) return false; // 无 msg_id 无法走被动通道
-  return getLimiter(accountId).tryAcquire(msgId);
+  return checkAndConsumePassiveReplyQuota({ accountId, msgId, scope: 'c2c' }).canReply;
+}
+
+export function rollbackPassiveSlot(accountId: string, msgId: string | undefined): void {
+  if (!msgId) return;
+  rollbackPassiveReplyQuota({ accountId, msgId, scope: 'c2c' });
 }
 
 export function registerGateway(accountId: string, gw: QQBotGateway): void {
@@ -58,7 +68,7 @@ export function registerGateway(accountId: string, gw: QQBotGateway): void {
 
 export function unregisterGateway(accountId: string): void {
   gateways.delete(accountId);
-  limiters.delete(accountId);
+  clearQuotaCacheForAccount(accountId);
 }
 
 export function getGateway(accountId: string): QQBotGateway | undefined {
@@ -91,16 +101,25 @@ export async function sendText(params: {
   accountId?: string;
   replyToId?: string;
   account: ResolvedQQBotAccount;
+  quotaReserved?: boolean;
 }): Promise<SendResult> {
   const accountId = params.account.accountId;
   const gw = gateways.get(accountId);
   if (!gw) return { error: `Bot "${accountId}" not running` };
+  const target = parseTarget(params.to);
+  const reservation = reservePassiveReply({
+    replyToId: params.replyToId,
+    accountId,
+    scope: target.scope,
+    quotaReserved: params.quotaReserved,
+  });
   try {
-    const target = parseTarget(params.to);
-    const msgId = resolveMsgId(params.replyToId, accountId);
-    const result = await gw.sendText(target, params.text, { msgId });
+    const result = await gw.sendText(target, params.text, { msgId: reservation.msgId });
     return { messageId: result.id };
-  } catch (err: unknown) { return formatError(err); }
+  } catch (err: unknown) {
+    reservation.rollback();
+    return formatError(err);
+  }
 }
 
 export async function sendMedia(params: {
@@ -111,14 +130,21 @@ export async function sendMedia(params: {
   accountId?: string;
   replyToId?: string;
   account: ResolvedQQBotAccount;
+  quotaReserved?: boolean;
 }): Promise<SendResult> {
   const accountId = params.account.accountId;
   const gw = gateways.get(accountId);
   if (!gw) return { error: `Bot "${accountId}" not running` };
+  const target = parseTarget(params.to);
+  const reservation = reservePassiveReply({
+    replyToId: params.replyToId,
+    accountId,
+    scope: target.scope,
+    quotaReserved: params.quotaReserved,
+  });
   try {
-    const target = parseTarget(params.to);
     const kind = params.mediaKind ?? 'image';
-    const msgId = resolveMsgId(params.replyToId, accountId);
+    const msgId = reservation.msgId;
     if (kind === 'voice') {
       const source = resolveVoiceSource(params.mediaUrl);
       const result = await gw.sendVoice(target, source, { text: params.text, msgId });
@@ -135,7 +161,10 @@ export async function sendMedia(params: {
     const fileType = MEDIA_KIND_TO_FILE_TYPE[kind];
     const result = await gw.sendMedia(target, params.mediaUrl, { text: params.text, msgId, fileType });
     return { messageId: result.id };
-  } catch (err: unknown) { return formatError(err); }
+  } catch (err: unknown) {
+    reservation.rollback();
+    return formatError(err);
+  }
 }
 
 export async function sendVoice(params: {
@@ -144,16 +173,25 @@ export async function sendVoice(params: {
   accountId?: string;
   replyToId?: string;
   account: ResolvedQQBotAccount;
+  quotaReserved?: boolean;
 }): Promise<SendResult> {
   const accountId = params.account.accountId;
   const gw = gateways.get(accountId);
   if (!gw) return { error: `Bot "${accountId}" not running` };
+  const target = parseTarget(params.to);
+  const reservation = reservePassiveReply({
+    replyToId: params.replyToId,
+    accountId,
+    scope: target.scope,
+    quotaReserved: params.quotaReserved,
+  });
   try {
-    const target = parseTarget(params.to);
-    const msgId = resolveMsgId(params.replyToId, accountId);
-    const result = await gw.sendVoice(target, params.source, { msgId });
+    const result = await gw.sendVoice(target, params.source, { msgId: reservation.msgId });
     return { messageId: result.id };
-  } catch (err: unknown) { return formatError(err); }
+  } catch (err: unknown) {
+    reservation.rollback();
+    return formatError(err);
+  }
 }
 
 export async function sendVideo(params: {
@@ -162,16 +200,25 @@ export async function sendVideo(params: {
   accountId?: string;
   replyToId?: string;
   account: ResolvedQQBotAccount;
+  quotaReserved?: boolean;
 }): Promise<SendResult> {
   const accountId = params.account.accountId;
   const gw = gateways.get(accountId);
   if (!gw) return { error: `Bot "${accountId}" not running` };
+  const target = parseTarget(params.to);
+  const reservation = reservePassiveReply({
+    replyToId: params.replyToId,
+    accountId,
+    scope: target.scope,
+    quotaReserved: params.quotaReserved,
+  });
   try {
-    const target = parseTarget(params.to);
-    const msgId = resolveMsgId(params.replyToId, accountId);
-    const result = await gw.sendVideo(target, params.videoUrl, { msgId });
+    const result = await gw.sendVideo(target, params.videoUrl, { msgId: reservation.msgId });
     return { messageId: result.id };
-  } catch (err: unknown) { return formatError(err); }
+  } catch (err: unknown) {
+    reservation.rollback();
+    return formatError(err);
+  }
 }
 
 // ── OutboundService（deliver-pipeline 专用）──
@@ -180,19 +227,31 @@ export class OutboundService {
   constructor(private readonly gw: QQBotGateway, private readonly accountId: string) {}
 
   async sendText(to: string, text: string, msgId?: string): Promise<SendResult> {
+    const target = parseTarget(to);
+    const reservation = reservePassiveReply({
+      replyToId: msgId,
+      accountId: this.accountId,
+      scope: target.scope,
+    });
     try {
-      const target = parseTarget(to);
-      const resolvedMsgId = resolveMsgId(msgId, this.accountId);
-      const result = await this.gw.sendText(target, text, { msgId: resolvedMsgId });
+      const result = await this.gw.sendText(target, text, { msgId: reservation.msgId });
       return { messageId: result.id };
-    } catch (err: unknown) { return formatError(err); }
+    } catch (err: unknown) {
+      reservation.rollback();
+      return formatError(err);
+    }
   }
 
   async sendMedia(to: string, source: string, opts?: { text?: string; msgId?: string; mediaKind?: MediaKind }): Promise<SendResult> {
+    const target = parseTarget(to);
+    const reservation = reservePassiveReply({
+      replyToId: opts?.msgId,
+      accountId: this.accountId,
+      scope: target.scope,
+    });
     try {
-      const target = parseTarget(to);
       const kind = opts?.mediaKind ?? 'image';
-      const resolvedMsgId = resolveMsgId(opts?.msgId, this.accountId);
+      const resolvedMsgId = reservation.msgId;
       if (kind === 'voice') {
         const voiceSource = resolveVoiceSource(source);
         const result = await this.gw.sendVoice(target, voiceSource, { text: opts?.text, msgId: resolvedMsgId });
@@ -209,7 +268,10 @@ export class OutboundService {
       const fileType = MEDIA_KIND_TO_FILE_TYPE[kind];
       const result = await this.gw.sendMedia(target, source, { text: opts?.text, msgId: resolvedMsgId, fileType });
       return { messageId: result.id };
-    } catch (err: unknown) { return formatError(err); }
+    } catch (err: unknown) {
+      reservation.rollback();
+      return formatError(err);
+    }
   }
 }
 

@@ -17,7 +17,7 @@
  * input_notify 推送才会重新显示 —— 这是需要周期性续期的原因。
  */
 import type { Middleware } from '@tencent-connect/qqbot-nodejs';
-import { tryAcquirePassiveSlot } from '../outbound/outbound-service.js';
+import { rollbackPassiveSlot, tryAcquirePassiveSlot } from '../outbound/outbound-service.js';
 import { subscribeOutboundMessage } from '../features/typing-refresh.js';
 
 /** QPS 约束：续期间隔不得低于 20s */
@@ -57,12 +57,13 @@ export function c2cTypingIndicator(opts: TypingIndicatorMiddlewareOptions): Midd
     const sendNow = (): void => {
       if (!active) return;
       // 被动配额可用 → 占用并带 msg_id 发送；耗尽 → 不带 msg_id 主动发送，
-      // 与回复消息的降级策略一致（见 outbound-service 的 resolveMsgId）
+      // 与回复消息的降级策略一致（见 outbound-service 的统一配额预留）
       const passive = tryAcquirePassiveSlot(accountId, ctx.replyTarget.msgId);
       const target = passive
         ? ctx.replyTarget
         : { scope: 'c2c' as const, targetId: ctx.replyTarget.targetId };
       ctx.bot.sendTyping(target, TYPING_DURATION_SEC).catch((err: unknown) => {
+        if (passive) rollbackPassiveSlot(accountId, ctx.replyTarget.msgId);
         ctx.log?.debug?.(`[typing] failed: ${err instanceof Error ? err.message : String(err)}`);
       });
       lastSentAt = Date.now();

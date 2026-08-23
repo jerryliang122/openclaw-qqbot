@@ -24,14 +24,14 @@ import { DeliverDebouncer } from '../outbound/debounce.js';
 import { StreamingController, shouldUseStreaming } from '../outbound/streaming-controller.js';
 import { getAdapters } from '../adapter/resolve.js';
 import { clearGroupHistory } from '../features/history-store.js';
-import { isAskUserPayload, buildQuestionKeyboard } from '../features/question-helpers.js';
+import { isAskUserPayload, buildQuestionKeyboard, getQuestionGatewayRuntime } from '../features/question-helpers.js';
 import { tryGetBotForAccount } from '../bot-instance.js';
 
 /** 失败兜底文案（对齐 telegram：Something went wrong while processing your request.） */
 const FAILURE_FALLBACK_TEXT = 'Something went wrong while processing your request. Please try again.';
 
 /**
- * 合并 AbortSignal（Node >= 20.3 使用 AbortSignal.any，低版本退回首个 signal）。
+ * 合并 AbortSignal（Node >= 20.3 使用 AbortSignal.any，低版本手工 fan-in）。
  * turnAdoptionLifecycle 的 pre-adoption abort 需要与请求级 signal 共同生效。
  */
 function combineAbortSignals(
@@ -42,7 +42,27 @@ function combineAbortSignals(
   if (typeof any === 'function') {
     return any.call(AbortSignal, requestSignal ? [requestSignal, turnSignal] : [turnSignal]);
   }
-  return requestSignal ?? turnSignal;
+  if (!requestSignal) return turnSignal;
+
+  const controller = new AbortController();
+  const cleanup = () => {
+    requestSignal.removeEventListener('abort', onRequestAbort);
+    turnSignal.removeEventListener('abort', onTurnAbort);
+  };
+  const abortFrom = (signal: AbortSignal) => {
+    cleanup();
+    controller.abort(signal.reason);
+  };
+  const onRequestAbort = () => abortFrom(requestSignal);
+  const onTurnAbort = () => abortFrom(turnSignal);
+
+  if (requestSignal.aborted) abortFrom(requestSignal);
+  else if (turnSignal.aborted) abortFrom(turnSignal);
+  else {
+    requestSignal.addEventListener('abort', onRequestAbort, { once: true });
+    turnSignal.addEventListener('abort', onTurnAbort, { once: true });
+  }
+  return controller.signal;
 }
 
 
@@ -190,22 +210,27 @@ export async function dispatchToOpenClaw(
       const payloadWithChannelData = payload as DeliverPayload & { channelData?: unknown };
       if (isAskUserPayload(payloadWithChannelData as any) && text) {
         const { questionId, optionValues } = (payloadWithChannelData as any).channelData.askUser;
-        const keyboard = buildQuestionKeyboard(questionId, optionValues);
-        const bot = tryGetBotForAccount(account.accountId);
-        if (bot) {
-          const replyTarget = {
-            scope: envelope.chatScope === 'group' ? 'group' as const : 'c2c' as const,
-            targetId: peerId,
-          };
-          try {
-            await bot.sendTextWithKeyboard(replyTarget, text, keyboard as never);
-            outboundSendOk++;
-            dlog?.debug(`[question] sent ask_user with keyboard questionId=${questionId} options=${optionValues.length}`);
-            return;
-          } catch (err) {
-            outboundSendFail++;
-            dlog?.error(`[question] sendTextWithKeyboard failed: ${err instanceof Error ? err.message : String(err)}`);
-            // fallback 到纯文本发送
+        const questionRuntime = await getQuestionGatewayRuntime();
+        if (!questionRuntime) {
+          dlog?.warn('[question] host does not export question-gateway-runtime; falling back to plain text');
+        } else {
+          const keyboard = buildQuestionKeyboard(questionId, optionValues);
+          const bot = tryGetBotForAccount(account.accountId);
+          if (bot) {
+            const replyTarget = {
+              scope: envelope.chatScope === 'group' ? 'group' as const : 'c2c' as const,
+              targetId: peerId,
+            };
+            try {
+              await bot.sendTextWithKeyboard(replyTarget, text, keyboard as never);
+              outboundSendOk++;
+              dlog?.debug(`[question] sent ask_user with keyboard questionId=${questionId} options=${optionValues.length}`);
+              return;
+            } catch (err) {
+              outboundSendFail++;
+              dlog?.error(`[question] sendTextWithKeyboard failed: ${err instanceof Error ? err.message : String(err)}`);
+              // fallback 到纯文本发送
+            }
           }
         }
       }
@@ -314,7 +339,7 @@ export async function dispatchToOpenClaw(
           deliver: deliverHandler,
         },
         replyOptions: {
-          abortSignal: ctx.signal,
+          abortSignal: combinedAbortSignal,
           runId: envelope.messageId,
           ...(streamingController?.isStaticSendMode
             ? {

@@ -9,7 +9,12 @@
  */
 import type { OpenClawConfig } from 'openclaw/plugin-sdk/config-contracts';
 import type { ResolvedQQBotAccount } from '../types.js';
-import { DEFAULT_ACCOUNT_ID, resolveQQBotAccount, applyQQBotAccountConfig } from '../config.js';
+import {
+  DEFAULT_ACCOUNT_ID,
+  resolveQQBotAccount,
+  applyQQBotAccountConfig,
+  resolveQQBotEnvClientSecret,
+} from '../config.js';
 import { getQQBotRuntime } from '../runtime.js';
 import { getAdapters } from '../adapter/resolve.js';
 import { QQBotGateway } from './qqbot-gateway.js';
@@ -220,6 +225,6 @@ export async function logoutAndClearCredentials(params: {
 
   const resolved = resolveQQBotAccount(changed ? nextCfg : cfg, accountId);
   const loggedOut = resolved.secretSource === 'none';
-  const envToken = Boolean(process.env.QQBOT_CLIENT_SECRET);
+  const envToken = Boolean(resolveQQBotEnvClientSecret());
   return { ok: true, cleared, envToken, loggedOut };
 }

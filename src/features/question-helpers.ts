@@ -23,6 +23,33 @@ export interface ParsedQuestionAction {
   optionIndex: number;
 }
 
+export interface QuestionGatewayRuntime {
+  resolveOption: (params: {
+    cfg: unknown;
+    questionId: string;
+    optionIndex: number;
+    senderId?: string;
+    gatewayUrl?: string;
+    clientDisplayName?: string;
+  }) => Promise<{ status: string }>;
+}
+
+let questionRuntimePromise: Promise<QuestionGatewayRuntime | null> | undefined;
+
+/**
+ * question gateway 是 OpenClaw 2026.8.1+ 的可选能力。
+ * 旧版 host 不导出该 subpath，必须在发送按钮前完成能力探测，避免投递死按钮。
+ */
+export function getQuestionGatewayRuntime(): Promise<QuestionGatewayRuntime | null> {
+  questionRuntimePromise ??= import('openclaw/plugin-sdk/question-gateway-runtime')
+    .then((mod) => {
+      const runtime = mod.questionGatewayRuntime as QuestionGatewayRuntime | undefined;
+      return runtime && typeof runtime.resolveOption === 'function' ? runtime : null;
+    })
+    .catch(() => null);
+  return questionRuntimePromise;
+}
+
 // ============ Payload Detection ============
 
 /**
