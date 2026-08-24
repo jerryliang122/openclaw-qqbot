@@ -24,7 +24,16 @@ import { DeliverDebouncer } from '../outbound/debounce.js';
 import { StreamingController, shouldUseStreaming } from '../outbound/streaming-controller.js';
 import { getAdapters } from '../adapter/resolve.js';
 import { clearGroupHistory } from '../features/history-store.js';
-import { isAskUserPayload, buildQuestionKeyboard, getQuestionGatewayRuntime } from '../features/question-helpers.js';
+import {
+  isAskUserPayload,
+  isNonSingleAskUserPayload,
+  buildQuestionKeyboard,
+  buildMultiQuestionKeyboard,
+  formatMultiQuestionCard,
+  parseMultiQuestionPrompt,
+  registerPendingMultiQuestion,
+  getQuestionGatewayRuntime,
+} from '../features/question-helpers.js';
 import { tryGetBotForAccount } from '../bot-instance.js';
 
 /** 失败兜底文案（对齐 telegram：Something went wrong while processing your request.） */
@@ -232,6 +241,41 @@ export async function dispatchToOpenClaw(
               // fallback 到纯文本发送
             }
           }
+        }
+      }
+
+      // ── 0b. ask_user 多问题投递：每题一条带按钮的消息。
+      // 框架对多问题只投递纯文本（无结构化选项），这里从文本反解题目结构；
+      // 按钮点选 / isOther 题的文字回复在回调与入站侧缓冲，
+      // 集齐后合成一条"用户文本回复"走入站通道，由框架的文本应答
+      // 解析器 resolve 挂起的 ask_user ──
+      if (isNonSingleAskUserPayload(payloadWithChannelData as any) && text) {
+        const { questionId } = (payloadWithChannelData as any).channelData.askUser;
+        const questions = parseMultiQuestionPrompt(text);
+        if (questions) {
+          const bot = tryGetBotForAccount(account.accountId);
+          if (bot) {
+            const scope = envelope.chatScope === 'group' ? 'group' as const : 'c2c' as const;
+            const replyTarget = { scope, targetId: peerId };
+            // 先登记再发送，避免用户先点按钮时查无此单
+            registerPendingMultiQuestion(questionId, scope, peerId, questions);
+            try {
+              for (const [index, question] of questions.entries()) {
+                const cardText = formatMultiQuestionCard(question, index, questions.length);
+                const keyboard = buildMultiQuestionKeyboard(questionId, index, question);
+                await bot.sendTextWithKeyboard(replyTarget, cardText, keyboard as never);
+                outboundSendOk++;
+              }
+              dlog?.debug(`[question] sent multi-question ask_user questionId=${questionId} questions=${questions.length}`);
+              return;
+            } catch (err) {
+              outboundSendFail++;
+              dlog?.error(`[question] multi-question send failed: ${err instanceof Error ? err.message : String(err)}`);
+              // 已发出的卡片仍可点选；此处走纯文本兜底补全未送达部分
+            }
+          }
+        } else {
+          dlog?.debug(`[question] multi-question prompt unparseable questionId=${questionId}; plain text`);
         }
       }
 

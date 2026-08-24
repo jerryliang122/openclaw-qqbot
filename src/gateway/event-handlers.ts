@@ -14,13 +14,25 @@ import { dispatchToOpenClaw } from '../dispatch/index.js';
 import { runWithRequestContext } from '../request-context.js';
 import { authorizeQQBotApprovalAction } from '../features/approval-capability.js';
 import { parseApprovalButtonData } from '../features/approval-helpers.js';
-import { getQuestionGatewayRuntime, parseQuestionButtonData } from '../features/question-helpers.js';
+import {
+  getQuestionGatewayRuntime,
+  parseQuestionButtonData,
+  parseMultiQuestionButtonData,
+  parseKeyedAnswerText,
+  recordMultiQuestionTap,
+  mergeMultiQuestionTextAnswers,
+  findPendingMultiQuestionByConversation,
+  markMultiQuestionResolved,
+  markMultiQuestionResolveFailed,
+} from '../features/question-helpers.js';
 import { recordKnownUser } from '../features/proactive.js';
-import { cacheMsgId } from '../features/msgid-cache.js';
+import { cacheMsgId, getCachedMsgId } from '../features/msgid-cache.js';
 import { getAdapters } from '../adapter/resolve.js';
 import { resolveGroupConfigFromAccount, resolveGroupPolicy, resolveMentionPatterns } from '../config.js';
 import { getPackageVersion } from '../utils/pkg-version.js';
-import { getOpenClawVersion } from '../bot-instance.js';
+import { stripMentionText, type MentionEntry } from '../utils/mention.js';
+import { getOpenClawVersion, tryGetBotForAccount } from '../bot-instance.js';
+import type { ParsedMultiQuestionAction } from '../features/question-helpers.js';
 
 export async function handleMessage(
   ctx: MiddlewareContext,
@@ -55,6 +67,14 @@ export async function handleMessage(
       lastInteractionAt: Date.now(),
     });
 
+    // ── 多问题 ask_user 的文字答案拦截（按钮 + 文字混合作答）──
+    // 仅当该会话存在进行中的多问题按钮单、且文本严格是 "题号: 内容" 格式
+    // 且全部能合法匹配题目时才消费；否则原样放行，闲聊不受影响。
+    if (await tryConsumeMultiQuestionTextAnswer(msg, account, runtime, log)) {
+      hlog.debug(`done msgId=${msg.messageId} (consumed as multi-question answer)`);
+      return;
+    }
+
     await runWithRequestContext(
       {
         accountId: account.accountId,
@@ -68,6 +88,66 @@ export async function handleMessage(
     hlog.error(`dispatch error: ${err}`);
   }
   hlog.debug(`done msgId=${msg.messageId}`);
+}
+
+/**
+ * 尝试把一条入站文字消息消费为多问题 ask_user 的（部分）答案。
+ * 返回 true 表示消息已被消费（调用方不应再走正常派发）。
+ */
+async function tryConsumeMultiQuestionTextAnswer(
+  msg: QQBotInboundMessage,
+  account: ResolvedQQBotAccount,
+  runtime: PluginRuntime,
+  log: PluginLogger,
+): Promise<boolean> {
+  try {
+    const scope = msg.replyTarget.scope;
+    if (scope !== 'c2c' && scope !== 'group') return false;
+    // 带附件 / 斜杠命令的消息不作答案处理
+    if (msg.attachments?.length) return false;
+    const rawText = msg.content?.trim() ?? '';
+    if (!rawText || rawText.startsWith('/')) return false;
+    // 群聊指令按钮预填会产生 @bot 前缀，先剥掉
+    const text = stripMentionText(rawText, msg.mentions as MentionEntry[] | undefined).trim();
+    if (!text) return false;
+
+    const pending = findPendingMultiQuestionByConversation(scope, msg.replyTarget.targetId);
+    if (!pending) return false;
+
+    const entries = parseKeyedAnswerText(text);
+    if (!entries) return false;
+
+    const merged = mergeMultiQuestionTextAnswers(pending.questionId, entries);
+    if (merged.status === 'buffered') {
+      const pendingTitles = merged.pendingQuestions.map((q) => q.header);
+      log.debug(`[question] text answer buffered id=${pending.questionId} answered=${merged.answeredCount}/${merged.total}`);
+      await sendMultiQuestionFeedbackText(
+        scope,
+        msg.replyTarget.targetId,
+        account,
+        `✅ 已记录 ${merged.answeredCount}/${merged.total}\n还剩：${pendingTitles.join('、')}`,
+      );
+      return true;
+    }
+    if (merged.status === 'complete') {
+      await dispatchMultiQuestionAnswer(
+        merged.replyText,
+        pending.questionId,
+        scope,
+        msg.replyTarget.targetId,
+        msg.senderId,
+        account,
+        runtime,
+        log,
+      );
+      return true;
+    }
+    // unknown/terminal/resolving/nomatch：一律放行走正常路径
+    return false;
+  } catch (err) {
+    log.error(`[question] text answer intercept error: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
 }
 
 const INTERACTION_QUERY  = 2001;
@@ -100,9 +180,9 @@ export async function handleInteraction(
     return;
   }
 
-  // question 按钮（ask_user）优先于审批按钮
+  // question 按钮（ask_user，含单问题 qqbot:q: 与多问题 qqbot:qm:）优先于审批按钮
   const buttonData = event.data?.resolved?.button_data;
-  if (buttonData?.startsWith('qqbot:q:')) {
+  if (buttonData?.startsWith('qqbot:q:') || buttonData?.startsWith('qqbot:qm:')) {
     await handleQuestion(event, account, runtime, log, acknowledgeInteraction);
     return;
   }
@@ -219,7 +299,13 @@ async function handleQuestion(
   if (!buttonData) return;
 
   const parsed = parseQuestionButtonData(buttonData);
-  if (!parsed) return;
+  if (!parsed) {
+    const multiParsed = parseMultiQuestionButtonData(buttonData);
+    if (multiParsed) {
+      await handleMultiQuestionTap(multiParsed, event, account, runtime, log);
+    }
+    return;
+  }
 
   // 无授权检查：ask_user 问题面向所有参与者（与审批不同，question 不是安全敏感操作）。
   // 框架侧 questionGatewayRuntime.resolveOption 已处理过期/重复提交等边界情况。
@@ -241,6 +327,141 @@ async function handleQuestion(
     log.debug(`[question] resolved questionId=${parsed.questionId} optionIndex=${parsed.optionIndex} status=${result.status}`);
   } catch (err) {
     log.error(`[question] resolve error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+// ── 多问题按钮处理（ask_user questions >= 2）──
+// 框架对多问题记录没有按钮解析通道（question.resolve 只接受整单提交，
+// resolveOption 仅支持单问题），这里按题缓冲点选，集齐后把
+// "1: 3\n2: 1" 这样的合成回复当作普通用户消息走入站通道，
+// 由框架的文本应答解析器（claimPendingAgentQuestionAnswer）完成 resolve。
+
+async function handleMultiQuestionTap(
+  parsed: ParsedMultiQuestionAction,
+  event: InteractionEvent,
+  account: ResolvedQQBotAccount,
+  runtime: PluginRuntime,
+  log: PluginLogger,
+): Promise<void> {
+  const operatorId = resolveOperatorId(event);
+  const scope: 'group' | 'c2c' = event.group_openid ? 'group' : 'c2c';
+  const peerId = (scope === 'group' ? event.group_openid : event.user_openid) ?? '';
+  if (!peerId) return; // 缺少会话定位信息，无法回执或合成派发
+
+  const tap = recordMultiQuestionTap(parsed.questionId, parsed.questionIndex, parsed.optionIndex);
+
+  if (tap.status === 'unknown' || tap.status === 'terminal') {
+    log.debug(`[question] multi tap ignored id=${parsed.questionId} status=${tap.status}`);
+    await sendMultiQuestionFeedback(event, account, '该问题已提交或已过期');
+    return;
+  }
+  if (tap.status === 'resolving') {
+    log.debug(`[question] multi tap dropped while resolving id=${parsed.questionId}`);
+    return;
+  }
+  if (tap.status === 'buffered') {
+    const pendingTitles = tap.pendingQuestions.map((q) => q.header);
+    log.debug(`[question] multi buffered id=${parsed.questionId} answered=${tap.answeredCount}/${tap.total}`);
+    await sendMultiQuestionFeedback(
+      event,
+      account,
+      `✅ 已记录 ${tap.answeredCount}/${tap.total}\n还剩：${pendingTitles.join('、')}`,
+    );
+    return;
+  }
+  // 按钮点选路径不会产生 nomatch（选项序号来自键盘本身）
+  if (tap.status !== 'complete') return;
+
+  // complete：合成一条用户文本回复走入站通道
+  await dispatchMultiQuestionAnswer(
+    tap.replyText,
+    parsed.questionId,
+    scope,
+    peerId,
+    operatorId,
+    account,
+    runtime,
+    log,
+  );
+}
+
+/**
+ * 把集齐的多问题答案合成为一条"用户文本回复"并入站派发。
+ * messageId 优先取该会话最近的真实 msg_id（msgid-cache），让后续回复
+ * 能挂被动引用；取不到时留空，回复走主动发送。
+ */
+async function dispatchMultiQuestionAnswer(
+  replyText: string,
+  questionId: string,
+  scope: 'c2c' | 'group',
+  peerId: string,
+  senderId: string | undefined,
+  account: ResolvedQQBotAccount,
+  runtime: PluginRuntime,
+  log: PluginLogger,
+): Promise<void> {
+  const syntheticMsg: QQBotInboundMessage = {
+    rawEventType: scope === 'group' ? 'GROUP_AT_MESSAGE_CREATE' : 'C2C_MESSAGE_CREATE',
+    kind: scope,
+    senderId: senderId ?? peerId,
+    senderName: undefined,
+    content: replyText,
+    messageId: getCachedMsgId(scope, peerId) || '',
+    timestamp: new Date().toISOString(),
+    replyTarget: { scope, targetId: peerId },
+    raw: {},
+  } as unknown as QQBotInboundMessage;
+  const syntheticCtx = {
+    message: syntheticMsg,
+    replyTarget: syntheticMsg.replyTarget,
+    state: {},
+    signal: undefined,
+  } as unknown as MiddlewareContext;
+
+  const qualifiedTarget = scope === 'group' ? `qqbot:group:${peerId}` : `qqbot:c2c:${peerId}`;
+  try {
+    await runWithRequestContext(
+      {
+        target: qualifiedTarget,
+        accountId: account.accountId,
+        messageId: syntheticMsg.messageId || undefined,
+        openId: senderId,
+      },
+      () => dispatchToOpenClaw(syntheticCtx, syntheticMsg, account, runtime, log.child('questionDispatch')),
+    );
+    markMultiQuestionResolved(questionId);
+    log.debug(`[question] multi answer dispatched id=${questionId}`);
+  } catch (err) {
+    markMultiQuestionResolveFailed(questionId);
+    log.error(`[question] multi dispatch error: ${err instanceof Error ? err.message : String(err)}`);
+    await sendMultiQuestionFeedbackText(scope, peerId, account, '⚠️ 提交失败，请重新点选或直接文字回复');
+  }
+}
+
+/** 尽力而为的状态回执（主动消息），失败仅记日志不影响主流程 */
+async function sendMultiQuestionFeedback(
+  event: InteractionEvent,
+  account: ResolvedQQBotAccount,
+  text: string,
+): Promise<void> {
+  const scope = event.group_openid ? 'group' as const : 'c2c' as const;
+  const targetId = event.group_openid ?? event.user_openid;
+  if (!targetId) return;
+  await sendMultiQuestionFeedbackText(scope, targetId, account, text);
+}
+
+async function sendMultiQuestionFeedbackText(
+  scope: 'c2c' | 'group',
+  targetId: string,
+  account: ResolvedQQBotAccount,
+  text: string,
+): Promise<void> {
+  const bot = tryGetBotForAccount(account.accountId);
+  if (!bot) return;
+  try {
+    await bot.sendText({ scope, targetId }, text);
+  } catch {
+    // 主动消息可能触发平台限频；回执是锦上添花，吞掉即可
   }
 }
 

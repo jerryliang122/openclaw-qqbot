@@ -2,9 +2,12 @@
  * ask_user 按钮辅助函数
  *
  * 与 approval-helpers.ts 模式一致：
- * - buildQuestionKeyboard: 构建 inline keyboard
- * - parseQuestionButtonData: 解析 INTERACTION_CREATE 的 button_data
- * - isAskUserPayload: 判断 payload 是否为 ask_user
+ * - buildQuestionKeyboard: 构建 inline keyboard（单问题）
+ * - buildMultiQuestionKeyboard: 构建多问题场景单题的 inline keyboard
+ * - parseQuestionButtonData / parseMultiQuestionButtonData: 解析 INTERACTION_CREATE 的 button_data
+ * - isAskUserPayload / isNonSingleAskUserPayload: 判断 payload 是否为 ask_user（单/非单问题）
+ * - parseMultiQuestionPrompt: 从多问题投递文本反解题目结构
+ * - registerPendingMultiQuestion 等: 多问题答案暂存 store（集齐后合成文本走入站通道）
  */
 
 import type { InlineKeyboard, KeyboardButton } from '../types.js';
@@ -12,14 +15,41 @@ import type { InlineKeyboard, KeyboardButton } from '../types.js';
 // ============ Constants ============
 
 const QUESTION_CALLBACK_PREFIX = 'qqbot:q:';
+const MULTI_QUESTION_CALLBACK_PREFIX = 'qqbot:qm:';
 
 /** questionId 格式: ask_<32位hex> */
 const QUESTION_ID_PATTERN = /^ask_[a-f0-9]{32}$/;
+
+/** gateway 协议上限：单次 ask_user 最多 3 个问题，每题最多 4 个选项 */
+const MAX_MULTI_QUESTIONS = 3;
+const MAX_OPTIONS_PER_QUESTION = 4;
+
+/** gateway 默认问题超时 15min，这里留 10min 余量兜住投递延迟 */
+const DEFAULT_MULTI_QUESTION_TTL_MS = 25 * 60 * 1000;
 
 // ============ Types ============
 
 export interface ParsedQuestionAction {
   questionId: string;
+  optionIndex: number;
+}
+
+/**
+ * ask_user 多问题场景中从投递文本解析出的单题结构。
+ * 框架的多问题 payload 只有 questionId + 格式化文本（无结构化选项数据），
+ * 题目结构需从文本反解。
+ */
+export interface MultiQuestionDef {
+  header: string;
+  question: string;
+  options: string[];
+  /** 题目声明了 "Other: reply with your own answer."（允许自由文本作答） */
+  isOther?: boolean;
+}
+
+export interface ParsedMultiQuestionAction {
+  questionId: string;
+  questionIndex: number;
   optionIndex: number;
 }
 
@@ -72,6 +102,150 @@ export function isAskUserPayload(payload: {
   );
 }
 
+/**
+ * 判断 DeliverPayload 是否为 ask_user「非单问题」场景。
+ *
+ * 框架只在恰好 1 个问题（且单选、非 secret、2-4 个唯一选项）时附带
+ * optionValues；其余情况 payload 只有 questionId + 纯文本。多问题结构
+ * 需要调用 parseMultiQuestionPrompt 从文本反解。
+ */
+export function isNonSingleAskUserPayload(payload: {
+  channelData?: { askUser?: { questionId?: unknown; optionValues?: unknown } };
+}): payload is { channelData: { askUser: { questionId: string } } } {
+  const askUser = payload.channelData?.askUser;
+  if (!askUser || typeof askUser !== 'object') return false;
+  const { questionId, optionValues } = askUser as { questionId?: unknown; optionValues?: unknown };
+  if (typeof questionId !== 'string' || !QUESTION_ID_PATTERN.test(questionId)) return false;
+  // 单问题场景由 isAskUserPayload 优先认领
+  return !Array.isArray(optionValues);
+}
+
+// ============ 多问题投递文本解析 ============
+
+const NUMBERED_LINE_PATTERN = /^(\d+)\.\s+(.+)$/;
+
+/**
+ * 从 ask_user 多问题投递文本中解析题目结构。
+ *
+ * 文本由框架 formatAgentHarnessUserInputPrompt 生成（多问题格式）：
+ * ```
+ * [intro]
+ * <空行>
+ * 1. <header>
+ * <题干>
+ * 1. <label> - <description>
+ * ...
+ * <空行>
+ * 2. <header>
+ * ...
+ * <空行>
+ * Reply by number or question id...
+ * ```
+ *
+ * 判别依赖生成器的两个不变量：
+ * - header 行总是紧跟空行之后（每个 question 前都有空行）
+ * - 选项行紧跟题干/上一选项（块内无空行）
+ *
+ * 解析失败返回 null（secret 警告行 / isOther 行 / 结构异常都会失败），
+ * 调用方回退纯文本展示。multiSelect 题无法从文本区分，按钮单选属可接受降级。
+ */
+export function parseMultiQuestionPrompt(text: string): MultiQuestionDef[] | null {
+  const lines = text.split(/\r?\n/);
+
+  // 定位第一个 "1. " header（其后必须紧跟空行或行首，排除 intro 干扰）
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i]!.match(NUMBERED_LINE_PATTERN);
+    if (m && Number(m[1]) === 1 && (i === 0 || !lines[i - 1]!.trim())) {
+      start = i;
+      break;
+    }
+  }
+  if (start < 0) return null;
+
+  const questions: MultiQuestionDef[] = [];
+  let header: string | undefined;
+  let questionText: string | undefined;
+  let options: string[] = [];
+  let isOther = false;
+  let afterBlank = true; // start 位置的 header 已由扫描保证满足"空行在前"
+
+  const finishQuestion = (): boolean => {
+    if (header === undefined || questionText === undefined) return false;
+    if (options.length < 2 || options.length > MAX_OPTIONS_PER_QUESTION) return false;
+    questions.push({ header, question: questionText, options, ...(isOther ? { isOther: true } : {}) });
+    header = undefined;
+    questionText = undefined;
+    options = [];
+    isOther = false;
+    return true;
+  };
+
+  for (let i = start; i < lines.length; i++) {
+    const trimmed = lines[i]!.trim();
+    if (!trimmed) {
+      afterBlank = true;
+      continue;
+    }
+    const m = trimmed.match(NUMBERED_LINE_PATTERN);
+    const num = m ? Number(m[1]) : NaN;
+
+    if (header === undefined) {
+      // 期待下一题 header：序号连续且前面是空行
+      if (!m || num !== questions.length + 1 || !afterBlank) return null;
+      header = m[2];
+      afterBlank = false;
+      continue;
+    }
+    if (questionText === undefined) {
+      // 期待题干：编号行说明结构异常
+      if (m) return null;
+      questionText = trimmed;
+      afterBlank = false;
+      continue;
+    }
+    // 选项后出现 isOther 声明行（框架默认文案 "Other: reply with your own answer."）
+    if (trimmed.startsWith('Other:') && options.length >= 2) {
+      isOther = true;
+      afterBlank = false;
+      continue;
+    }
+    // 期待选项 / 下一题 header / 终止（引导语等尾部内容）
+    if (m && num === 1 && options.length === 0 && !afterBlank) {
+      options.push(m[2]);
+      afterBlank = false;
+      continue;
+    }
+    if (
+      m &&
+      num === options.length + 1 &&
+      options.length > 0 &&
+      options.length < MAX_OPTIONS_PER_QUESTION &&
+      !afterBlank
+    ) {
+      options.push(m[2]);
+      afterBlank = false;
+      continue;
+    }
+    // 当前题尚未入列，下一题 header 的序号 = 已入列数 + 当前题 + 1
+    if (m && num === questions.length + 2 && afterBlank) {
+      if (!finishQuestion()) return null;
+      header = m[2];
+      afterBlank = false;
+      continue;
+    }
+    // 其余内容：收尾并停止（正常情况是尾部引导语）
+    if (!finishQuestion()) return null;
+    break;
+  }
+  if (header !== undefined || questionText !== undefined || options.length > 0) {
+    // 循环耗尽时仍有未收尾的题目
+    if (!finishQuestion()) return null;
+  }
+  if (questions.length < 2 || questions.length > MAX_MULTI_QUESTIONS) return null;
+  return questions;
+}
+
 // ============ Keyboard Builder ============
 
 /**
@@ -112,6 +286,164 @@ export function buildQuestionKeyboard(
   };
 }
 
+/**
+ * 为 ask_user 多问题场景构建第 questionIndex 题的 inline keyboard。
+ *
+ * - 选项按钮：action.type=1（回调），button_data `qqbot:qm:<id>:<题号>:<选项号>`，
+ *   group_id 按题隔离（`question-<i>`）保证同题互斥、跨题不互斥
+ * - isOther 题追加「✍️ 其他」指令按钮（action.type=2）：点击后客户端在
+ *   输入框预填 `<题号>: `，用户续写自由答案后发送，天然就是 keyed 答案格式
+ * - 按钮标签超过宽度预算时自动改为每行 2 个，避免文字显示不全
+ */
+export function buildMultiQuestionKeyboard(
+  questionId: string,
+  questionIndex: number,
+  question: MultiQuestionDef,
+): InlineKeyboard {
+  const buttons: KeyboardButton[] = question.options.map((optionLine, optionIndex) => ({
+    id: `q${questionIndex}_${optionIndex}`,
+    render_data: {
+      label: buildButtonLabel(optionLine),
+      visited_label: '已选',
+      style: 1 as const,
+    },
+    action: {
+      type: 1 as const,
+      data: `${MULTI_QUESTION_CALLBACK_PREFIX}${questionId}:${questionIndex}:${optionIndex}`,
+      permission: { type: 2 as const },
+      click_limit: 1,
+    },
+    group_id: `question-${questionIndex}`,
+  }));
+
+  if (question.isOther) {
+    buttons.push({
+      id: `q${questionIndex}_other`,
+      render_data: {
+        label: '✍️ 其他',
+        visited_label: '✍️ 其他',
+        style: 0 as const,
+      },
+      action: {
+        type: 2 as const,
+        // 点击后输入框预填 "题号: "，用户续写后手动发送
+        data: `${questionIndex + 1}: `,
+        enter: false,
+        permission: { type: 2 as const },
+        unsupport_tips: '当前客户端版本不支持，请直接回复「题号: 答案」',
+      },
+      // 指令按钮不属于互斥选项组
+    });
+  }
+
+  return {
+    content: {
+      rows: layoutButtonRows(buttons),
+    },
+  };
+}
+
+/** 自适应分行：标签全部较短时一行放满，否则每行 2 个 */
+function layoutButtonRows(buttons: KeyboardButton[]): Array<{ buttons: KeyboardButton[] }> {
+  const widest = buttons.reduce(
+    (max, b) => Math.max(max, estimateLabelWidth(b.render_data?.label ?? '')),
+    0,
+  );
+  if (widest <= SINGLE_ROW_MAX_LABEL_WIDTH || buttons.length <= 2) {
+    return [{ buttons }];
+  }
+  const rows: Array<{ buttons: KeyboardButton[] }> = [];
+  for (let i = 0; i < buttons.length; i += 2) {
+    rows.push({ buttons: buttons.slice(i, i + 2) });
+  }
+  return rows;
+}
+
+/**
+ * 选项整行形如 "调研/方案 (Recommended) - 搜索、分析、对比、出方案。"，
+ * 按第一个 " - " 拆出标签部分（拆不准时退回整行，不影响答案正确性——
+ * 答案靠题号/选项号定位，不依赖标签文本）。
+ */
+export function splitOptionLabel(optionLine: string): string {
+  const sep = optionLine.indexOf(' - ');
+  if (sep > 0) return optionLine.slice(0, sep).trim();
+  return optionLine.trim();
+}
+
+function splitOptionDescription(optionLine: string): string {
+  const label = splitOptionLabel(optionLine);
+  if (optionLine.length > label.length && optionLine.startsWith(label)) {
+    return optionLine.slice(label.length).replace(/^\s*-\s*/, '').trim();
+  }
+  return '';
+}
+
+/** 估算文字显示宽度：CJK/全角/emoji 记 2，其余记 1 */
+export function estimateLabelWidth(text: string): number {
+  let width = 0;
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    const wide =
+      (code >= 0x1100 && code <= 0x115f) ||
+      (code >= 0x2e80 && code <= 0xa4cf) ||
+      (code >= 0xac00 && code <= 0xd7a3) ||
+      (code >= 0xf900 && code <= 0xfaff) ||
+      (code >= 0xfe30 && code <= 0xfe6f) ||
+      (code >= 0xff00 && code <= 0xff60) ||
+      (code >= 0xffe0 && code <= 0xffe6) ||
+      code >= 0x1f300;
+    width += wide ? 2 : 1;
+  }
+  return width;
+}
+
+/** 按钮标签安全宽度（约 12 个汉字），超出截断加省略号 */
+const MAX_BUTTON_LABEL_WIDTH = 24;
+/** 一行放满时允许的最大标签宽度，超过改为每行 2 个 */
+const SINGLE_ROW_MAX_LABEL_WIDTH = 20;
+
+/** 从选项整行生成按钮短标签：剥描述 → 剥 "(Recommended)" 后缀 → 超宽截断 */
+export function buildButtonLabel(optionLine: string): string {
+  let label = splitOptionLabel(optionLine);
+  label = label.replace(/\s*\(\s*recommended\s*\)\s*$/i, '').trim();
+  if (estimateLabelWidth(label) <= MAX_BUTTON_LABEL_WIDTH) return label;
+  let truncated = '';
+  let width = 0;
+  for (const ch of label) {
+    const w = estimateLabelWidth(ch);
+    if (width + w > MAX_BUTTON_LABEL_WIDTH - 2) break;
+    truncated += ch;
+    width += w;
+  }
+  return `${truncated.trimEnd()}…`;
+}
+
+/**
+ * 格式化多问题卡片中单题的文本部分（QQ 客户端原生 Markdown 渲染）。
+ * 完整选项（含描述）放在正文里，按钮只放截断后的短标签。
+ */
+export function formatMultiQuestionCard(
+  question: MultiQuestionDef,
+  questionIndex: number,
+  total: number,
+): string {
+  const lines = [`**${questionIndex + 1}/${total} · ${question.header}**`];
+  if (question.question.trim()) {
+    lines.push(question.question.trim());
+  }
+  lines.push('');
+  for (const optionLine of question.options) {
+    const label = splitOptionLabel(optionLine);
+    const desc = splitOptionDescription(optionLine);
+    lines.push(desc ? `- ${label}：${desc}` : `- ${label}`);
+  }
+  lines.push('', '请点选下方按钮作答');
+  if (question.isOther) {
+    lines.push(`选项不合适？点「✍️ 其他」后输入，或直接回复 "${questionIndex + 1}: 你的答案"`);
+  }
+  return lines.join('\n');
+}
+
 // ============ Button Data Parser ============
 
 /**
@@ -137,4 +469,294 @@ export function parseQuestionButtonData(buttonData: string): ParsedQuestionActio
   if (!Number.isInteger(optionIndex) || optionIndex < 0 || optionIndex > 3) return null;
 
   return { questionId, optionIndex };
+}
+
+/**
+ * 解析多问题按钮的 button_data。
+ *
+ * 格式: `qqbot:qm:<questionId>:<questionIndex>:<optionIndex>`
+ * 返回 null 表示不是多问题按钮。
+ */
+export function parseMultiQuestionButtonData(buttonData: string): ParsedMultiQuestionAction | null {
+  if (!buttonData.startsWith(MULTI_QUESTION_CALLBACK_PREFIX)) return null;
+
+  const payload = buttonData.slice(MULTI_QUESTION_CALLBACK_PREFIX.length);
+  const parts = payload.split(':');
+  if (parts.length !== 3) return null;
+
+  const [questionId, questionIndexStr, optionIndexStr] = parts;
+  if (!QUESTION_ID_PATTERN.test(questionId)) return null;
+  if (!questionIndexStr || !optionIndexStr) return null;
+
+  const questionIndex = Number(questionIndexStr);
+  const optionIndex = Number(optionIndexStr);
+  if (!Number.isInteger(questionIndex) || questionIndex < 0 || questionIndex >= MAX_MULTI_QUESTIONS) {
+    return null;
+  }
+  if (!Number.isInteger(optionIndex) || optionIndex < 0 || optionIndex >= MAX_OPTIONS_PER_QUESTION) {
+    return null;
+  }
+
+  return { questionId, questionIndex, optionIndex };
+}
+
+// ============ 多问题答案暂存 Store ============
+
+/** 一题的答案：按钮点选（选项序号）或自由文本（isOther 题） */
+type MultiQuestionAnswer = { optionIndex: number } | { text: string };
+
+interface PendingMultiQuestion {
+  scope: 'c2c' | 'group';
+  targetId: string;
+  questions: MultiQuestionDef[];
+  /** questionIndex -> 答案（同题重复作答，最后一次为准） */
+  answers: Map<number, MultiQuestionAnswer>;
+  terminal: boolean;
+  /** 正在合成入站提交（防并发重复提交） */
+  resolving: boolean;
+  expiresAtMs: number;
+  cleanupTimer: ReturnType<typeof setTimeout>;
+}
+
+const pendingMultiQuestions = new Map<string, PendingMultiQuestion>();
+/** `${scope}:${targetId}` -> questionId，供入站文字答案按会话定位 */
+const pendingByConversation = new Map<string, string>();
+
+function conversationKey(scope: 'c2c' | 'group', targetId: string): string {
+  return `${scope}:${targetId}`;
+}
+
+/**
+ * 登记一次多问题 ask_user 投递，供按钮回调 / 入站文字按题缓冲答案。
+ * 必须在发送按钮消息之前调用，避免「先点后登记」竞态。
+ */
+export function registerPendingMultiQuestion(
+  questionId: string,
+  scope: 'c2c' | 'group',
+  targetId: string,
+  questions: MultiQuestionDef[],
+  ttlMs: number = DEFAULT_MULTI_QUESTION_TTL_MS,
+): void {
+  const existing = pendingMultiQuestions.get(questionId);
+  if (existing) clearTimeout(existing.cleanupTimer);
+
+  const entry: PendingMultiQuestion = {
+    scope,
+    targetId,
+    questions,
+    answers: new Map(),
+    terminal: false,
+    resolving: false,
+    expiresAtMs: Date.now() + ttlMs,
+    cleanupTimer: setTimeout(() => {
+      if (pendingMultiQuestions.get(questionId) === entry) {
+        pendingMultiQuestions.delete(questionId);
+      }
+      if (pendingByConversation.get(conversationKey(scope, targetId)) === questionId) {
+        pendingByConversation.delete(conversationKey(scope, targetId));
+      }
+    }, ttlMs),
+  };
+  entry.cleanupTimer.unref?.();
+  pendingMultiQuestions.set(questionId, entry);
+  pendingByConversation.set(conversationKey(scope, targetId), questionId);
+}
+
+/** 按会话查找进行中的多问题单（终态/提交中/已过期不算） */
+export function findPendingMultiQuestionByConversation(
+  scope: 'c2c' | 'group',
+  targetId: string,
+): { questionId: string } | undefined {
+  const questionId = pendingByConversation.get(conversationKey(scope, targetId));
+  if (!questionId) return undefined;
+  const entry = pendingMultiQuestions.get(questionId);
+  if (!entry || entry.terminal || entry.resolving || entry.expiresAtMs <= Date.now()) {
+    return undefined;
+  }
+  return { questionId };
+}
+
+export type MultiQuestionTapResult =
+  | { status: 'unknown' }
+  | { status: 'terminal' }
+  | { status: 'resolving' }
+  | { status: 'nomatch' }
+  | {
+      status: 'buffered';
+      total: number;
+      answeredCount: number;
+      /** 尚未作答的题目 */
+      pendingQuestions: MultiQuestionDef[];
+    }
+  | {
+      status: 'complete';
+      total: number;
+      /**
+       * 按题序号定位的合成回复文本（如 "1: 3\n2: 1" 或 "1: 3\n2: 自由文本"）。
+       * 作为普通用户消息走入站通道后，框架的文本应答解析器会把它
+       * 解析成各题答案并 resolve 挂起的 ask_user。
+       */
+      replyText: string;
+    };
+
+function buildMultiQuestionReplyText(entry: PendingMultiQuestion): string {
+  return [...entry.answers.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([questionIdx, answer]) =>
+      `${questionIdx + 1}: ${'optionIndex' in answer ? answer.optionIndex + 1 : answer.text}`)
+    .join('\n');
+}
+
+function bufferedOrComplete(entry: PendingMultiQuestion): MultiQuestionTapResult {
+  if (entry.answers.size < entry.questions.length) {
+    const pendingQuestions = entry.questions.filter((_, index) => !entry.answers.has(index));
+    return {
+      status: 'buffered',
+      total: entry.questions.length,
+      answeredCount: entry.answers.size,
+      pendingQuestions,
+    };
+  }
+  entry.resolving = true;
+  return {
+    status: 'complete',
+    total: entry.questions.length,
+    replyText: buildMultiQuestionReplyText(entry),
+  };
+}
+
+/**
+ * 记录一次多问题按钮点选。
+ * - 未登记/已过期 -> unknown
+ * - 已终态（已提交/已在框架侧结束）-> terminal
+ * - 正在提交中 -> resolving
+ * - 还有题目未作答 -> buffered（附带剩余题目）
+ * - 全部作答 -> complete（同步置 resolving，调用方拿到回复文本后走入站派发）
+ */
+export function recordMultiQuestionTap(
+  questionId: string,
+  questionIndex: number,
+  optionIndex: number,
+): MultiQuestionTapResult {
+  const entry = pendingMultiQuestions.get(questionId);
+  if (!entry) return { status: 'unknown' };
+  if (entry.expiresAtMs <= Date.now()) {
+    if (pendingMultiQuestions.get(questionId) === entry) {
+      pendingMultiQuestions.delete(questionId);
+    }
+    clearTimeout(entry.cleanupTimer);
+    return { status: 'unknown' };
+  }
+  if (entry.terminal) return { status: 'terminal' };
+  if (entry.resolving) return { status: 'resolving' };
+
+  const question = entry.questions[questionIndex];
+  if (!question) return { status: 'unknown' };
+  if (typeof question.options[optionIndex] !== 'string') return { status: 'unknown' };
+
+  entry.answers.set(questionIndex, { optionIndex });
+  return bufferedOrComplete(entry);
+}
+
+/** keyed 答案行格式："题号: 内容"（冒号支持全角） */
+const KEYED_ANSWER_LINE_PATTERN = /^\s*(\d+)\s*[:：]\s*(.+?)\s*$/;
+
+/**
+ * 严格解析 keyed 答案文本：所有非空行都必须是 "题号: 内容" 格式，
+ * 任一行不匹配即返回 null（宁可不拦截，不可误吞闲聊）。
+ */
+export function parseKeyedAnswerText(
+  text: string,
+): Array<{ index: number; value: string }> | null {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+  const entries: Array<{ index: number; value: string }> = [];
+  for (const line of lines) {
+    const m = line.match(KEYED_ANSWER_LINE_PATTERN);
+    if (!m) return null;
+    entries.push({ index: Number(m[1]), value: m[2]! });
+  }
+  return entries;
+}
+
+/** 非自由作答题的值匹配：1-based 选项序号、完整选项行或其标签（忽略大小写） */
+function matchOptionValue(question: MultiQuestionDef, value: string): number | null {
+  const v = value.trim();
+  if (!v) return null;
+  if (/^\d+$/.test(v)) {
+    const idx = Number(v) - 1;
+    return idx >= 0 && idx < question.options.length ? idx : null;
+  }
+  const lower = v.toLowerCase();
+  for (let i = 0; i < question.options.length; i++) {
+    const line = question.options[i]!;
+    if (line.toLowerCase() === lower || splitOptionLabel(line).toLowerCase() === lower) {
+      return i;
+    }
+  }
+  return null;
+}
+
+/**
+ * 把入站文字答案合并进缓冲（按钮 + 文字混合作答场景）。
+ * 整体校验后才写入：isOther 题接受任意文本；其余题必须是选项序号/选项文本，
+ * 校验失败返回 nomatch（调用方应放行消息走正常路径，不消费）。
+ */
+export function mergeMultiQuestionTextAnswers(
+  questionId: string,
+  entries: ReadonlyArray<{ index: number; value: string }>,
+): MultiQuestionTapResult {
+  const entry = pendingMultiQuestions.get(questionId);
+  if (!entry) return { status: 'unknown' };
+  if (entry.expiresAtMs <= Date.now()) {
+    if (pendingMultiQuestions.get(questionId) === entry) {
+      pendingMultiQuestions.delete(questionId);
+    }
+    clearTimeout(entry.cleanupTimer);
+    return { status: 'unknown' };
+  }
+  if (entry.terminal) return { status: 'terminal' };
+  if (entry.resolving) return { status: 'resolving' };
+  if (entries.length === 0) return { status: 'nomatch' };
+
+  const validated = new Map<number, MultiQuestionAnswer>();
+  for (const e of entries) {
+    const questionIdx = e.index - 1;
+    const question = entry.questions[questionIdx];
+    if (questionIdx < 0 || !question) return { status: 'nomatch' };
+    if (question.isOther) {
+      const text = e.value.trim();
+      if (!text) return { status: 'nomatch' };
+      validated.set(questionIdx, { text });
+    } else {
+      const optionIndex = matchOptionValue(question, e.value);
+      if (optionIndex === null) return { status: 'nomatch' };
+      validated.set(questionIdx, { optionIndex });
+    }
+  }
+
+  for (const [questionIdx, answer] of validated) {
+    entry.answers.set(questionIdx, answer);
+  }
+  return bufferedOrComplete(entry);
+}
+
+/** 入站派发已受理（或问题已在框架侧结束）后标记终态，后续点选按 terminal 处理 */
+export function markMultiQuestionResolved(questionId: string): void {
+  const entry = pendingMultiQuestions.get(questionId);
+  if (entry) {
+    entry.terminal = true;
+    entry.resolving = false;
+  }
+}
+
+/** 入站派发失败后复位，允许用户再点一次触发重试 */
+export function markMultiQuestionResolveFailed(questionId: string): void {
+  const entry = pendingMultiQuestions.get(questionId);
+  if (entry) {
+    entry.resolving = false;
+  }
 }
