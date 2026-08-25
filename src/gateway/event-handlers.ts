@@ -18,13 +18,12 @@ import {
   getQuestionGatewayRuntime,
   parseQuestionButtonData,
   parseMultiQuestionButtonData,
-  parseKeyedAnswerText,
   recordMultiQuestionTap,
-  mergeMultiQuestionTextAnswers,
-  submitMultiQuestionAnswers,
-  findPendingMultiQuestionByConversation,
-  markMultiQuestionResolved,
   markMultiQuestionResolveFailed,
+  getPendingMultiQuestions,
+  buildMultiQuestionAnswerText,
+  formatMultiQuestionConfirmCard,
+  buildMultiQuestionConfirmKeyboard,
   type MultiQuestionAnswer,
 } from '../features/question-helpers.js';
 import { recordKnownUser } from '../features/proactive.js';
@@ -32,7 +31,6 @@ import { cacheMsgId } from '../features/msgid-cache.js';
 import { getAdapters } from '../adapter/resolve.js';
 import { resolveGroupConfigFromAccount, resolveGroupPolicy, resolveMentionPatterns } from '../config.js';
 import { getPackageVersion } from '../utils/pkg-version.js';
-import { stripMentionText, type MentionEntry } from '../utils/mention.js';
 import { getOpenClawVersion, tryGetBotForAccount } from '../bot-instance.js';
 import type { ParsedMultiQuestionAction } from '../features/question-helpers.js';
 
@@ -69,13 +67,9 @@ export async function handleMessage(
       lastInteractionAt: Date.now(),
     });
 
-    // ── 多问题 ask_user 的文字答案拦截（按钮 + 文字混合作答）──
-    // 仅当该会话存在进行中的多问题按钮单、且文本严格是 "题号: 内容" 格式
-    // 且全部能合法匹配题目时才消费；否则原样放行，闲聊不受影响。
-    if (await tryConsumeMultiQuestionTextAnswer(msg, account, runtime, log)) {
-      hlog.debug(`done msgId=${msg.messageId} (consumed as multi-question answer)`);
-      return;
-    }
+    // ── 多问题 ask_user 的最终答案不在此拦截 ──
+    // 确认卡的指令按钮代发（或用户手打）的 "1: 3\n2: 1" 是真实用户消息，
+    // 必须原样放行走框架原生 keyed 文本认领；任何拦截都会破坏认领链路。
 
     await runWithRequestContext(
       {
@@ -90,67 +84,6 @@ export async function handleMessage(
     hlog.error(`dispatch error: ${err}`);
   }
   hlog.debug(`done msgId=${msg.messageId}`);
-}
-
-/**
- * 尝试把一条入站文字消息消费为多问题 ask_user 的（部分）答案。
- * 返回 true 表示消息已被消费（调用方不应再走正常派发）。
- */
-async function tryConsumeMultiQuestionTextAnswer(
-  msg: QQBotInboundMessage,
-  account: ResolvedQQBotAccount,
-  runtime: PluginRuntime,
-  log: PluginLogger,
-): Promise<boolean> {
-  try {
-    const scope = msg.replyTarget.scope;
-    if (scope !== 'c2c' && scope !== 'group') return false;
-    // 带附件 / 斜杠命令的消息不作答案处理
-    if (msg.attachments?.length) return false;
-    const rawText = msg.content?.trim() ?? '';
-    if (!rawText || rawText.startsWith('/')) return false;
-    // 群聊指令按钮预填会产生 @bot 前缀，先剥掉
-    const text = stripMentionText(rawText, msg.mentions as MentionEntry[] | undefined).trim();
-    if (!text) return false;
-
-    const pending = findPendingMultiQuestionByConversation(scope, msg.replyTarget.targetId);
-    if (!pending) return false;
-
-    const entries = parseKeyedAnswerText(text);
-    if (!entries) return false;
-
-    const merged = mergeMultiQuestionTextAnswers(pending.questionId, entries);
-    if (merged.status === 'buffered') {
-      const pendingTitles = merged.pendingQuestions.map((q) => q.header);
-      log.debug(`[question] text answer buffered id=${pending.questionId} answered=${merged.answeredCount}/${merged.total}`);
-      await sendMultiQuestionFeedbackText(
-        scope,
-        msg.replyTarget.targetId,
-        account,
-        `✅ 已记录 ${merged.answeredCount}/${merged.total}\n还剩：${pendingTitles.join('、')}`,
-      );
-      return true;
-    }
-    if (merged.status === 'complete') {
-      await resolveMultiQuestionAnswer(
-        pending.questionId,
-        merged.total,
-        merged.answers,
-        msg.senderId,
-        scope,
-        msg.replyTarget.targetId,
-        account,
-        runtime,
-        log,
-      );
-      return true;
-    }
-    // unknown/terminal/resolving/nomatch：一律放行走正常路径
-    return false;
-  } catch (err) {
-    log.error(`[question] text answer intercept error: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
-  }
 }
 
 const INTERACTION_QUERY  = 2001;
@@ -335,13 +268,15 @@ async function handleQuestion(
 
 // ── 多问题按钮处理（ask_user questions >= 2）──
 // 框架对多问题记录没有单题按钮解析通道（resolveOption 仅支持单问题），
-// 这里按题缓冲点选，集齐后通过 questionGatewayRuntime.resolveAnswers
-// 整单 resolve 问题记录——与单问题按钮同一条 gateway 通道，resolve 提交
-// 后框架侧 waitAnswer 返回、挂起的 ask_user turn 恢复运行。
-// 注意：不要退回"合成一条用户文本走入站通道"的旧方案——合成消息会被
-// 框架当成 steering 注入挂起的 run（isInboundUserMessage/fingerprint
-// 配套缺失，claim 不触发），答案永远到不了 pending question（生产
-// 2026-08-24 事故：问题 6 分钟超时、模型未恢复）。
+// 这里按题缓冲点选，集齐后发一张"确认卡"：指令按钮（action.type=2,
+// enter=true）携带完整答案文本 "1: 3\n2: 1"，由 QQ 客户端以真实用户
+// 消息发出，走框架原生的 keyed 文本认领通道 resolve 挂起的 ask_user。
+// 注意两条红线（都出过生产事故，勿回退）：
+// 1. 不要程序化提交：官方 openclaw 无多问题提交 API，改官方代码要背
+//    fork 维护成本；
+// 2. 不要合成入站消息"假装用户回答"：合成消息会被框架当成 steering
+//    注入挂起的 run，claim 不触发，模型等答案直到超时（2026-08-24 事故）。
+// 只有真实用户消息（客户端代发或手打）能被框架认领。
 
 async function handleMultiQuestionTap(
   parsed: ParsedMultiQuestionAction,
@@ -353,7 +288,7 @@ async function handleMultiQuestionTap(
   const operatorId = resolveOperatorId(event);
   const scope: 'group' | 'c2c' = event.group_openid ? 'group' : 'c2c';
   const peerId = (scope === 'group' ? event.group_openid : event.user_openid) ?? '';
-  if (!peerId) return; // 缺少会话定位信息，无法回执或提交
+  if (!peerId) return; // 缺少会话定位信息，无法回执或发确认卡
 
   log.info(
     `[question] multi tap id=${parsed.questionId} q=${parsed.questionIndex + 1} opt=${parsed.optionIndex + 1} operator=${operatorId ?? 'unknown'}`,
@@ -383,69 +318,52 @@ async function handleMultiQuestionTap(
   // 按钮点选路径不会产生 nomatch（选项序号来自键盘本身）
   if (tap.status !== 'complete') return;
 
-  // complete：整单提交给框架
-  await resolveMultiQuestionAnswer(
+  // complete：发确认卡，由用户一键代发真实答案消息
+  await sendMultiQuestionConfirmCard(
     parsed.questionId,
-    tap.total,
     tap.answers,
-    operatorId,
     scope,
     peerId,
     account,
-    runtime,
     log,
   );
 }
 
 /**
- * 把集齐的多问题答案整单 resolve 给框架。
- * 走 questionGatewayRuntime.resolveAnswers（question.get + question.resolve），
- * 不经过入站派发——挂起的 ask_user turn 由框架侧 waitAnswer 唤醒，
- * 后续模型输出仍从原始 turn 的投递管线发出（被动回复额度沿用原 msg_id）。
+ * 集齐后发确认卡。正文按题展示已选内容，键盘带两个指令按钮：
+ * 「✅ 提交」（enter=true，客户端自动以用户身份发出答案文本）与
+ * 「✏️ 改一改」（填入输入框，用户编辑后手动发送）。
+ * 发出后复位 resolving 锁——用户可以继续点选修改答案，再拿到新确认卡。
  */
-async function resolveMultiQuestionAnswer(
+async function sendMultiQuestionConfirmCard(
   questionId: string,
-  total: number,
   answers: ReadonlyMap<number, MultiQuestionAnswer>,
-  senderId: string | undefined,
   scope: 'c2c' | 'group',
   peerId: string,
   account: ResolvedQQBotAccount,
-  runtime: PluginRuntime,
   log: PluginLogger,
 ): Promise<void> {
-  const cfg = getAdapters(runtime).getConfig?.() ?? {};
-  try {
-    const result = await submitMultiQuestionAnswers({
-      cfg,
-      questionId,
-      total,
-      answers,
-      senderId,
-      clientDisplayName: 'QQBot question',
-    });
-    if (result.status === 'answered') {
-      markMultiQuestionResolved(questionId);
-      log.info(`[question] multi answer submitted id=${questionId}`);
-      return;
-    }
-    if (result.status === 'already-terminal') {
-      // 已在框架侧结束（过期/取消/被别的通道抢先提交）——对用户等价于完成
-      markMultiQuestionResolved(questionId);
-      log.info(`[question] multi answer raced terminal state id=${questionId}`);
-      await sendMultiQuestionFeedbackText(scope, peerId, account, '该问题已提交或已过期');
-      return;
-    }
-    // unsupported：host 版本过旧，未导出 resolveAnswers
+  const answerText = buildMultiQuestionAnswerText(answers);
+  const questions = getPendingMultiQuestions(questionId);
+  const cardText = questions
+    ? formatMultiQuestionConfirmCard(questions, answers)
+    : `**全部题目已作答，请确认**\n\n${answerText}`;
+
+  const bot = tryGetBotForAccount(account.accountId);
+  if (!bot) {
     markMultiQuestionResolveFailed(questionId);
-    log.error(
-      `[question] host does not export resolveAnswers; multi-question submit requires a newer openclaw id=${questionId}`,
-    );
-    await sendMultiQuestionFeedbackText(scope, peerId, account, '⚠️ 当前 OpenClaw 版本不支持多问题提交，请升级后重试');
+    log.error(`[question] confirm card send failed: bot unavailable id=${questionId}`);
+    await sendMultiQuestionFeedbackText(scope, peerId, account, '⚠️ 提交卡发送失败，请直接文字回复答案');
+    return;
+  }
+  try {
+    await bot.sendTextWithKeyboard({ scope, targetId: peerId }, cardText, buildMultiQuestionConfirmKeyboard(answerText) as never);
+    markMultiQuestionResolveFailed(questionId); // 复位锁，允许继续改答案
+    log.info(`[question] confirm card sent id=${questionId} answers=${JSON.stringify(answerText)}`);
   } catch (err) {
     markMultiQuestionResolveFailed(questionId);
-    log.error(`[question] multi submit error id=${questionId}: ${err instanceof Error ? err.message : String(err)}`);
-    await sendMultiQuestionFeedbackText(scope, peerId, account, '⚠️ 提交失败，请重新点选或直接文字回复');
+    log.error(`[question] confirm card send error id=${questionId}: ${err instanceof Error ? err.message : String(err)}`);
+    await sendMultiQuestionFeedbackText(scope, peerId, account, '⚠️ 提交卡发送失败，请直接文字回复答案');
   }
 }
 

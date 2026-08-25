@@ -6,23 +6,23 @@ import {
   buildQuestionKeyboard,
   buildMultiQuestionKeyboard,
   buildButtonLabel,
+  buildMultiQuestionAnswerText,
+  buildMultiQuestionConfirmKeyboard,
+  formatMultiQuestionConfirmCard,
   estimateLabelWidth,
   formatMultiQuestionCard,
+  getPendingMultiQuestions,
   splitOptionLabel,
   parseQuestionButtonData,
   parseMultiQuestionButtonData,
   parseMultiQuestionPrompt,
-  parseKeyedAnswerText,
   isAskUserPayload,
   isNonSingleAskUserPayload,
   registerPendingMultiQuestion,
   recordMultiQuestionTap,
-  mergeMultiQuestionTextAnswers,
-  submitMultiQuestionAnswers,
   findPendingMultiQuestionByConversation,
   markMultiQuestionResolved,
   markMultiQuestionResolveFailed,
-  _overrideQuestionGatewayRuntimeForTests,
   type MultiQuestionAnswer,
 } from '../src/features/question-helpers.js';
 
@@ -30,10 +30,7 @@ import {
 function answerSnapshotText(result: {
   answers: ReadonlyMap<number, MultiQuestionAnswer>;
 }): string {
-  return [...result.answers.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([idx, a]) => `${idx + 1}: ${'optionIndex' in a ? a.optionIndex + 1 : a.text}`)
-    .join('\n');
+  return buildMultiQuestionAnswerText(result.answers);
 }
 
 function test(name: string, fn: () => void) {
@@ -658,216 +655,75 @@ test('TTL 过期 -> unknown', async () => {
   registerPendingMultiQuestion(TTL_ID, 'c2c', 'peer-ttl', PARSED_QUESTIONS, 5);
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(recordMultiQuestionTap(TTL_ID, 0, 0).status, 'unknown');
-  assert.equal(mergeMultiQuestionTextAnswers(TTL_ID, [{ index: 1, value: '1' }]).status, 'unknown');
+  assert.equal(getPendingMultiQuestions(TTL_ID), null);
   assert.equal(findPendingMultiQuestionByConversation('c2c', 'peer-ttl'), undefined);
 });
 
-console.log('\n=== 9. keyed 答案文本解析 ===');
+console.log('\n=== 9. 确认卡答案文本 ===');
 
-test('单行 "1: 3" -> 解析成功', () => {
-  assert.deepEqual(parseKeyedAnswerText('1: 3'), [{ index: 1, value: '3' }]);
-});
-
-test('多行、全角冒号、无空格', () => {
-  assert.deepEqual(parseKeyedAnswerText('1：3\n2:自由文本'), [
-    { index: 1, value: '3' },
-    { index: 2, value: '自由文本' },
+test('答案快照 -> keyed 文本（数字选项 1-based，按题序）', () => {
+  const answers = new Map<number, MultiQuestionAnswer>([
+    [1, { optionIndex: 0 }],
+    [0, { optionIndex: 2 }],
   ]);
+  assert.equal(buildMultiQuestionAnswerText(answers), '1: 3\n2: 1');
 });
 
-test('任一行不是 keyed 格式 -> null（宁可不拦截）', () => {
-  assert.equal(parseKeyedAnswerText('今天天气不错'), null);
-  assert.equal(parseKeyedAnswerText('1: 3\n顺便聊聊'), null);
-  assert.equal(parseKeyedAnswerText(''), null);
-  assert.equal(parseKeyedAnswerText('1:'), null);
-});
-
-console.log('\n=== 10. 文字答案合并（按钮 + 文字混合） ===');
-
-test('isOther 题接受自由文本并按原文合成', () => {
-  registerPendingMultiQuestion(MULTI_ID, 'c2c', 'peer-1', PARSED_ISOTHER_QUESTIONS);
-  // 第 1 题按钮作答
-  assert.equal(recordMultiQuestionTap(MULTI_ID, 0, 1).status, 'buffered');
-  // 第 2 题文字作答（非 isOther，数字）
-  const merged = mergeMultiQuestionTextAnswers(MULTI_ID, [{ index: 2, value: '2' }]);
-  assert.equal(merged.status, 'complete');
-  if (merged.status === 'complete') {
-    assert.equal(answerSnapshotText(merged), '1: 2\n2: 2');
-  }
-});
-
-test('isOther 题自由文本直通', () => {
-  registerPendingMultiQuestion(MULTI_ID, 'c2c', 'peer-1', PARSED_ISOTHER_QUESTIONS);
-  assert.equal(recordMultiQuestionTap(MULTI_ID, 1, 0).status, 'buffered');
-  const merged = mergeMultiQuestionTextAnswers(MULTI_ID, [
-    { index: 1, value: '我想自己写答案' },
+test('isOther 自由文本按原文进入 keyed 文本', () => {
+  const answers = new Map<number, MultiQuestionAnswer>([
+    [0, { text: '我想自己写答案' }],
+    [1, { optionIndex: 0 }],
   ]);
-  assert.equal(merged.status, 'complete');
-  if (merged.status === 'complete') {
-    assert.equal(answerSnapshotText(merged), '1: 我想自己写答案\n2: 1');
-  }
+  assert.equal(buildMultiQuestionAnswerText(answers), '1: 我想自己写答案\n2: 1');
 });
 
-test('非 isOther 题接受选项序号 / 选项标签', () => {
+console.log('\n=== 10. 确认卡（正文 + 指令按钮） ===');
+
+test('确认卡正文按题展示已选标签', () => {
   resetPending();
-  const byNumber = mergeMultiQuestionTextAnswers(MULTI_ID, [{ index: 1, value: '4' }]);
-  assert.equal(byNumber.status, 'buffered');
-  const byLabel = mergeMultiQuestionTextAnswers(MULTI_ID, [
-    { index: 2, value: '仓库/物流状态对不上' },
+  const questions = getPendingMultiQuestions(MULTI_ID)!;
+  const answers = new Map<number, MultiQuestionAnswer>([
+    [0, { optionIndex: 2 }],
+    [1, { optionIndex: 0 }],
   ]);
-  assert.equal(byLabel.status, 'complete');
-  if (byLabel.status === 'complete') {
-    assert.equal(answerSnapshotText(byLabel), '1: 4\n2: 2');
-  }
+  const text = formatMultiQuestionConfirmCard(questions, answers);
+  assert.ok(text.startsWith('**全部题目已作答，请确认**'));
+  assert.ok(text.includes(`1. ${PARSED_QUESTIONS[0]!.header}：`));
+  assert.ok(text.includes(`2. ${PARSED_QUESTIONS[1]!.header}：`));
+  // 第 1 题第 3 项的标签应出现在正文里
+  assert.ok(text.includes(splitOptionLabel(PARSED_QUESTIONS[0]!.options[2]!)));
 });
 
-test('非 isOther 题不匹配选项 -> nomatch（消息应放行）', () => {
+test('确认卡正文：isOther 文本答案原样展示，未答题标注', () => {
   resetPending();
-  assert.equal(
-    mergeMultiQuestionTextAnswers(MULTI_ID, [{ index: 1, value: '不存在的选项' }]).status,
-    'nomatch',
+  const questions = getPendingMultiQuestions(MULTI_ID)!;
+  const text = formatMultiQuestionConfirmCard(
+    questions,
+    new Map<number, MultiQuestionAnswer>([[0, { text: '自由内容' }]]),
   );
-  assert.equal(
-    mergeMultiQuestionTextAnswers(MULTI_ID, [{ index: 9, value: '3' }]).status,
-    'nomatch',
-  );
-  // nomatch 不产生任何写入
-  assert.equal(recordMultiQuestionTap(MULTI_ID, 0, 0).status, 'buffered');
+  assert.ok(text.includes(`1. ${PARSED_QUESTIONS[0]!.header}：自由内容`));
+  assert.ok(text.includes(`2. ${PARSED_QUESTIONS[1]!.header}：（未作答）`));
 });
 
-test('文字答案覆盖同题的按钮答案（最后一次为准）', () => {
+test('确认卡键盘：两个指令按钮携带完整答案文本', () => {
+  const kb = buildMultiQuestionConfirmKeyboard('1: 3\n2: 1');
+  const rows = kb.content.rows;
+  assert.equal(rows.length, 1);
+  const [submit, edit] = rows[0]!.buttons;
+  assert.equal(submit!.render_data.label, '✅ 提交');
+  assert.equal(submit!.action.type, 2);
+  assert.equal(submit!.action.data, '1: 3\n2: 1');
+  assert.equal(submit!.action.enter, true);
+  assert.equal(edit!.render_data.label, '✏️ 改一改');
+  assert.equal(edit!.action.type, 2);
+  assert.equal(edit!.action.data, '1: 3\n2: 1');
+  assert.equal(edit!.action.enter, false);
+});
+
+test('getPendingMultiQuestions：未登记 -> null，登记后返回题目定义', () => {
+  assert.equal(getPendingMultiQuestions('ask_00000000000000000000000000000000'), null);
   resetPending();
-  recordMultiQuestionTap(MULTI_ID, 0, 0);
-  const merged = mergeMultiQuestionTextAnswers(MULTI_ID, [
-    { index: 1, value: '3' },
-    { index: 2, value: '1' },
-  ]);
-  assert.equal(merged.status, 'complete');
-  if (merged.status === 'complete') {
-    assert.equal(answerSnapshotText(merged), '1: 3\n2: 1');
-  }
-});
-
-test('部分校验失败时整条 nomatch，不部分写入', () => {
-  resetPending();
-  const merged = mergeMultiQuestionTextAnswers(MULTI_ID, [
-    { index: 1, value: '2' },
-    { index: 2, value: '完全不匹配' },
-  ]);
-  assert.equal(merged.status, 'nomatch');
-  // 第 1 题没有被写入
-  const after = recordMultiQuestionTap(MULTI_ID, 0, 0);
-  assert.equal(after.status, 'buffered');
-});
-
-console.log('\n=== 11. 整单提交（questionGatewayRuntime.resolveAnswers） ===');
-
-test('host 未导出 resolveAnswers -> unsupported（不抛错）', async () => {
-  _overrideQuestionGatewayRuntimeForTests({
-    resolveOption: async () => ({ status: 'answered' }),
-  });
-  try {
-    const result = await submitMultiQuestionAnswers({
-      cfg: {},
-      questionId: MULTI_ID,
-      total: 2,
-      answers: new Map([[0, { optionIndex: 1 }], [1, { optionIndex: 0 }]]),
-    });
-    assert.deepEqual(result, { status: 'unsupported' });
-  } finally {
-    _overrideQuestionGatewayRuntimeForTests(null);
-  }
-});
-
-test('answered：按题号顺序转成位置答案数组提交', async () => {
-  const calls: Array<Record<string, unknown>> = [];
-  _overrideQuestionGatewayRuntimeForTests({
-    resolveOption: async () => ({ status: 'answered' }),
-    resolveAnswers: async (params) => {
-      calls.push(JSON.parse(JSON.stringify(params)));
-      return { status: 'answered' };
-    },
-  });
-  try {
-    const result = await submitMultiQuestionAnswers({
-      cfg: { marker: 'cfg' },
-      questionId: MULTI_ID,
-      total: 2,
-      answers: new Map([[1, { optionIndex: 0 }], [0, { text: '自由答案' }]]),
-      senderId: 'user-openid',
-    });
-    assert.deepEqual(result, { status: 'answered' });
-    assert.equal(calls.length, 1);
-    assert.deepEqual(calls[0], {
-      cfg: { marker: 'cfg' },
-      questionId: MULTI_ID,
-      answers: [{ text: '自由答案' }, { optionIndex: 0 }],
-      senderId: 'user-openid',
-      clientDisplayName: 'QQBot question',
-    });
-  } finally {
-    _overrideQuestionGatewayRuntimeForTests(null);
-  }
-});
-
-test('already-terminal：竞态终态返回而非抛错', async () => {
-  _overrideQuestionGatewayRuntimeForTests({
-    resolveOption: async () => ({ status: 'answered' }),
-    resolveAnswers: async () => ({ status: 'already-terminal', reason: 'already-terminal' }),
-  });
-  try {
-    const result = await submitMultiQuestionAnswers({
-      cfg: {},
-      questionId: MULTI_ID,
-      total: 1,
-      answers: new Map([[0, { optionIndex: 0 }]]),
-    });
-    assert.deepEqual(result, { status: 'already-terminal' });
-  } finally {
-    _overrideQuestionGatewayRuntimeForTests(null);
-  }
-});
-
-test('gateway 异常向上抛（调用方负责 markFailed + 回执）', async () => {
-  _overrideQuestionGatewayRuntimeForTests({
-    resolveOption: async () => ({ status: 'answered' }),
-    resolveAnswers: async () => {
-      throw new Error('gateway down');
-    },
-  });
-  try {
-    await assert.rejects(
-      submitMultiQuestionAnswers({
-        cfg: {},
-        questionId: MULTI_ID,
-        total: 1,
-        answers: new Map([[0, { optionIndex: 0 }]]),
-      }),
-      /gateway down/,
-    );
-  } finally {
-    _overrideQuestionGatewayRuntimeForTests(null);
-  }
-});
-
-test('答案缺失防御：快照不全时抛错', async () => {
-  _overrideQuestionGatewayRuntimeForTests({
-    resolveOption: async () => ({ status: 'answered' }),
-    resolveAnswers: async () => ({ status: 'answered' }),
-  });
-  try {
-    await assert.rejects(
-      submitMultiQuestionAnswers({
-        cfg: {},
-        questionId: MULTI_ID,
-        total: 2,
-        answers: new Map([[0, { optionIndex: 0 }]]),
-      }),
-      /missing answer for question 2/,
-    );
-  } finally {
-    _overrideQuestionGatewayRuntimeForTests(null);
-  }
+  assert.equal(getPendingMultiQuestions(MULTI_ID)!.length, 2);
 });
 
 console.log('\n==================================================');

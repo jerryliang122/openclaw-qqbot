@@ -8,8 +8,9 @@
  * - isAskUserPayload / isNonSingleAskUserPayload: 判断 payload 是否为 ask_user（单/非单问题）
  * - parseMultiQuestionPrompt: 从多问题投递文本反解题目结构
  * - registerPendingMultiQuestion 等: 多问题答案暂存 store
- * - submitMultiQuestionAnswers: 集齐后通过 questionGatewayRuntime.resolveAnswers
- *   整单 resolve（不合成入站消息，见 event-handlers 顶部注释）
+ * - buildMultiQuestionConfirmKeyboard 等: 集齐后发"确认卡"——指令按钮
+ *   (type=2, enter=true) 携带完整答案文本，由客户端以真实用户消息发出，
+ *   走框架原生的 keyed 文本认领通道（不程序化提交，不合成入站消息）
  */
 
 import type { InlineKeyboard, KeyboardButton } from '../types.js';
@@ -55,16 +56,8 @@ export interface ParsedMultiQuestionAction {
   optionIndex: number;
 }
 
-/** 一次多问题整单提交的答案（题号 -> 按钮选项序号或自由文本） */
+/** 一次多问题整单的答案（题号 -> 按钮选项序号或自由文本） */
 export type MultiQuestionAnswer = { optionIndex: number } | { text: string };
-
-export type MultiQuestionAnswerInput = { optionIndex: number; text?: never } | { text: string; optionIndex?: never };
-
-export type MultiQuestionSubmitResult =
-  | { status: 'answered' }
-  | { status: 'already-terminal' }
-  /** host 版本过旧，questionGatewayRuntime 未导出 resolveAnswers */
-  | { status: 'unsupported' };
 
 export interface QuestionGatewayRuntime {
   resolveOption: (params: {
@@ -75,18 +68,6 @@ export interface QuestionGatewayRuntime {
     gatewayUrl?: string;
     clientDisplayName?: string;
   }) => Promise<{ status: string }>;
-  /**
-   * 整单提交多问题答案（openclaw 需带 resolveAnswers 导出）。
-   * 按题号位置映射到记录的 canonical 选项，避免通道侧反解 question id。
-   */
-  resolveAnswers?: (params: {
-    cfg: unknown;
-    questionId: string;
-    answers: ReadonlyArray<MultiQuestionAnswerInput>;
-    senderId?: string;
-    gatewayUrl?: string;
-    clientDisplayName?: string;
-  }) => Promise<{ status: 'answered' } | { status: 'already-terminal'; reason: string }>;
 }
 
 let questionRuntimePromise: Promise<QuestionGatewayRuntime | null> | undefined;
@@ -103,13 +84,6 @@ export function getQuestionGatewayRuntime(): Promise<QuestionGatewayRuntime | nu
     })
     .catch(() => null);
   return questionRuntimePromise;
-}
-
-/** @internal 测试注入用：覆盖缓存的 question gateway runtime */
-export function _overrideQuestionGatewayRuntimeForTests(
-  runtime: QuestionGatewayRuntime | null,
-): void {
-  questionRuntimePromise = runtime ? Promise.resolve(runtime) : undefined;
 }
 
 // ============ Payload Detection ============
@@ -680,92 +654,6 @@ export function recordMultiQuestionTap(
   return bufferedOrComplete(entry);
 }
 
-/** keyed 答案行格式："题号: 内容"（冒号支持全角） */
-const KEYED_ANSWER_LINE_PATTERN = /^\s*(\d+)\s*[:：]\s*(.+?)\s*$/;
-
-/**
- * 严格解析 keyed 答案文本：所有非空行都必须是 "题号: 内容" 格式，
- * 任一行不匹配即返回 null（宁可不拦截，不可误吞闲聊）。
- */
-export function parseKeyedAnswerText(
-  text: string,
-): Array<{ index: number; value: string }> | null {
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (lines.length === 0) return null;
-  const entries: Array<{ index: number; value: string }> = [];
-  for (const line of lines) {
-    const m = line.match(KEYED_ANSWER_LINE_PATTERN);
-    if (!m) return null;
-    entries.push({ index: Number(m[1]), value: m[2]! });
-  }
-  return entries;
-}
-
-/** 非自由作答题的值匹配：1-based 选项序号、完整选项行或其标签（忽略大小写） */
-function matchOptionValue(question: MultiQuestionDef, value: string): number | null {
-  const v = value.trim();
-  if (!v) return null;
-  if (/^\d+$/.test(v)) {
-    const idx = Number(v) - 1;
-    return idx >= 0 && idx < question.options.length ? idx : null;
-  }
-  const lower = v.toLowerCase();
-  for (let i = 0; i < question.options.length; i++) {
-    const line = question.options[i]!;
-    if (line.toLowerCase() === lower || splitOptionLabel(line).toLowerCase() === lower) {
-      return i;
-    }
-  }
-  return null;
-}
-
-/**
- * 把入站文字答案合并进缓冲（按钮 + 文字混合作答场景）。
- * 整体校验后才写入：isOther 题接受任意文本；其余题必须是选项序号/选项文本，
- * 校验失败返回 nomatch（调用方应放行消息走正常路径，不消费）。
- */
-export function mergeMultiQuestionTextAnswers(
-  questionId: string,
-  entries: ReadonlyArray<{ index: number; value: string }>,
-): MultiQuestionTapResult {
-  const entry = pendingMultiQuestions.get(questionId);
-  if (!entry) return { status: 'unknown' };
-  if (entry.expiresAtMs <= Date.now()) {
-    if (pendingMultiQuestions.get(questionId) === entry) {
-      pendingMultiQuestions.delete(questionId);
-    }
-    clearTimeout(entry.cleanupTimer);
-    return { status: 'unknown' };
-  }
-  if (entry.terminal) return { status: 'terminal' };
-  if (entry.resolving) return { status: 'resolving' };
-  if (entries.length === 0) return { status: 'nomatch' };
-
-  const validated = new Map<number, MultiQuestionAnswer>();
-  for (const e of entries) {
-    const questionIdx = e.index - 1;
-    const question = entry.questions[questionIdx];
-    if (questionIdx < 0 || !question) return { status: 'nomatch' };
-    if (question.isOther) {
-      const text = e.value.trim();
-      if (!text) return { status: 'nomatch' };
-      validated.set(questionIdx, { text });
-    } else {
-      const optionIndex = matchOptionValue(question, e.value);
-      if (optionIndex === null) return { status: 'nomatch' };
-      validated.set(questionIdx, { optionIndex });
-    }
-  }
-
-  for (const [questionIdx, answer] of validated) {
-    entry.answers.set(questionIdx, answer);
-  }
-  return bufferedOrComplete(entry);
-}
-
 /** 入站派发已受理（或问题已在框架侧结束）后标记终态，后续点选按 terminal 处理 */
 export function markMultiQuestionResolved(questionId: string): void {
   const entry = pendingMultiQuestions.get(questionId);
@@ -775,7 +663,10 @@ export function markMultiQuestionResolved(questionId: string): void {
   }
 }
 
-/** 整单提交失败后复位，允许用户再点一次触发重试 */
+/**
+ * 复位 complete 时置上的 resolving 锁（确认卡已发出或发送失败后调用），
+ * 允许用户继续点选修改答案并重新拿到确认卡。
+ */
 export function markMultiQuestionResolveFailed(questionId: string): void {
   const entry = pendingMultiQuestions.get(questionId);
   if (entry) {
@@ -783,37 +674,87 @@ export function markMultiQuestionResolveFailed(questionId: string): void {
   }
 }
 
+/** 读取登记的题目定义（确认卡正文按题展示已选项） */
+export function getPendingMultiQuestions(questionId: string): MultiQuestionDef[] | null {
+  const entry = pendingMultiQuestions.get(questionId);
+  if (!entry || entry.expiresAtMs <= Date.now()) return null;
+  return entry.questions;
+}
+
 /**
- * 把集齐的多问题答案整单提交给框架（question.resolve，与单问题按钮同一条
- * 已被生产验证的 gateway 通道）。位置序号由框架侧映射到记录的 canonical
- * 选项，插件不需要反解 question id。调用方负责 markResolved/markFailed。
+ * 合成整单答案文本："1: 3\n2: 1"（数字选项走框架原生 keyed 文本解析，
+ * 由客户端以真实用户消息发出后，框架认领并 resolve 挂起的 ask_user）。
  */
-export async function submitMultiQuestionAnswers(params: {
-  cfg: unknown;
-  questionId: string;
-  total: number;
-  answers: ReadonlyMap<number, MultiQuestionAnswer>;
-  senderId?: string;
-  clientDisplayName?: string;
-}): Promise<MultiQuestionSubmitResult> {
-  const questionRuntime = await getQuestionGatewayRuntime();
-  if (!questionRuntime?.resolveAnswers || typeof questionRuntime.resolveAnswers !== 'function') {
-    return { status: 'unsupported' };
+export function buildMultiQuestionAnswerText(
+  answers: ReadonlyMap<number, MultiQuestionAnswer>,
+): string {
+  return [...answers.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([questionIdx, answer]) =>
+      `${questionIdx + 1}: ${'optionIndex' in answer ? answer.optionIndex + 1 : answer.text}`)
+    .join('\n');
+}
+
+/** 确认卡正文：按题展示人话版的已选内容 */
+export function formatMultiQuestionConfirmCard(
+  questions: readonly MultiQuestionDef[],
+  answers: ReadonlyMap<number, MultiQuestionAnswer>,
+): string {
+  const lines = ['**全部题目已作答，请确认**', ''];
+  for (const [index, question] of questions.entries()) {
+    const answer = answers.get(index);
+    const display = !answer
+      ? '（未作答）'
+      : 'optionIndex' in answer
+        ? splitOptionLabel(question.options[answer.optionIndex] ?? '')
+        : answer.text;
+    lines.push(`${index + 1}. ${question.header}：${display}`);
   }
-  const positional: MultiQuestionAnswerInput[] = [];
-  for (let index = 0; index < params.total; index++) {
-    const answer = params.answers.get(index);
-    if (!answer) {
-      throw new Error(`missing answer for question ${index + 1}/${params.total}`);
-    }
-    positional.push('optionIndex' in answer ? { optionIndex: answer.optionIndex } : { text: answer.text });
-  }
-  const result = await questionRuntime.resolveAnswers({
-    cfg: params.cfg,
-    questionId: params.questionId,
-    answers: positional,
-    senderId: params.senderId,
-    clientDisplayName: params.clientDisplayName ?? 'QQBot question',
-  });
-  return result.status === 'answered' ? { status: 'answered' } : { status: 'already-terminal' };
+  lines.push('', '点「✅ 提交」自动发送答案；想改动就点「✏️ 改一改」编辑后手动发送。');
+  return lines.join('\n');
+}
+
+/**
+ * 确认卡键盘：两个指令按钮（action.type=2）携带完整答案文本。
+ * - 提交：enter=true，客户端点击后自动以用户身份发出（真实消息，框架可认领）
+ * - 改一改：enter=false，答案填入输入框，用户编辑后手动发送
+ */
+export function buildMultiQuestionConfirmKeyboard(answerText: string): InlineKeyboard {
+  const buttons: KeyboardButton[] = [
+    {
+      id: 'confirm_submit',
+      render_data: {
+        label: '✅ 提交',
+        visited_label: '已提交',
+        style: 1 as const,
+      },
+      action: {
+        type: 2 as const,
+        data: answerText,
+        enter: true,
+        permission: { type: 2 as const },
+        unsupport_tips: '当前客户端不支持，请手动回复上方答案文本',
+      },
+    },
+    {
+      id: 'confirm_edit',
+      render_data: {
+        label: '✏️ 改一改',
+        visited_label: '✏️ 改一改',
+        style: 0 as const,
+      },
+      action: {
+        type: 2 as const,
+        data: answerText,
+        enter: false,
+        permission: { type: 2 as const },
+        unsupport_tips: '当前客户端不支持，请手动回复上方答案文本',
+      },
+    },
+  ];
+  return {
+    content: {
+      rows: [{ buttons }],
+    },
+  };
 }

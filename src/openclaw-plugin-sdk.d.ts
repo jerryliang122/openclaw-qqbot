@@ -678,15 +678,6 @@ declare module "openclaw/plugin-sdk/question-gateway-runtime" {
       gatewayUrl?: string;
       clientDisplayName?: string;
     }) => Promise<{ status: string }>;
-    /** 整单提交多问题答案（较新 openclaw 才有，调用方需探测存在性） */
-    resolveAnswers?: (params: {
-      cfg: unknown;
-      questionId: string;
-      answers: ReadonlyArray<{ optionIndex: number; text?: never } | { text: string; optionIndex?: never }>;
-      senderId?: string;
-      gatewayUrl?: string;
-      clientDisplayName?: string;
-    }) => Promise<{ status: "answered" } | { status: "already-terminal"; reason: string }>;
     resolveReactionIndex: (...args: unknown[]) => unknown;
     resolveReaction: (...args: unknown[]) => unknown;
     registerChannelDelivery: (...args: unknown[]) => unknown;
