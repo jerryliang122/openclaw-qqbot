@@ -292,11 +292,15 @@ export function buildQuestionKeyboard(
   };
 }
 
+/** 选项按钮的序号前缀，与正文里的加粗序号 1./2./3./4. 一一对应 */
+const OPTION_NUMBER_PREFIXES = ['①', '②', '③', '④'] as const;
+
 /**
  * 为 ask_user 多问题场景构建第 questionIndex 题的 inline keyboard。
  *
  * - 选项按钮：action.type=1（回调），button_data `qqbot:qm:<id>:<题号>:<选项号>`，
- *   group_id 按题隔离（`question-<i>`）保证同题互斥、跨题不互斥
+ *   group_id 按题隔离（`question-<i>`）保证同题互斥、跨题不互斥；
+ *   标签带 ①②③ 序号前缀（截断时也能与正文选项对上号）
  * - isOther 题追加「✍️ 其他」指令按钮（action.type=2）：点击后客户端在
  *   输入框预填 `<题号>: `，用户续写自由答案后发送，天然就是 keyed 答案格式
  * - 按钮标签超过宽度预算时自动改为每行 2 个，避免文字显示不全
@@ -306,21 +310,26 @@ export function buildMultiQuestionKeyboard(
   questionIndex: number,
   question: MultiQuestionDef,
 ): InlineKeyboard {
-  const buttons: KeyboardButton[] = question.options.map((optionLine, optionIndex) => ({
-    id: `q${questionIndex}_${optionIndex}`,
-    render_data: {
-      label: buildButtonLabel(optionLine),
-      visited_label: '已选',
-      style: 1 as const,
-    },
-    action: {
-      type: 1 as const,
-      data: `${MULTI_QUESTION_CALLBACK_PREFIX}${questionId}:${questionIndex}:${optionIndex}`,
-      permission: { type: 2 as const },
-      click_limit: 1,
-    },
-    group_id: `question-${questionIndex}`,
-  }));
+  const buttons: KeyboardButton[] = question.options.map((optionLine, optionIndex) => {
+    const prefix = OPTION_NUMBER_PREFIXES[optionIndex] ?? '';
+    // 前缀 + 空格的显示宽度（全角序号 2 + 空格 1）
+    const reserve = estimateLabelWidth(`${prefix} `);
+    return {
+      id: `q${questionIndex}_${optionIndex}`,
+      render_data: {
+        label: `${prefix} ${buildButtonLabel(optionLine, reserve)}`,
+        visited_label: '已选',
+        style: 1 as const,
+      },
+      action: {
+        type: 1 as const,
+        data: `${MULTI_QUESTION_CALLBACK_PREFIX}${questionId}:${questionIndex}:${optionIndex}`,
+        permission: { type: 2 as const },
+        click_limit: 1,
+      },
+      group_id: `question-${questionIndex}`,
+    };
+  });
 
   if (question.isOther) {
     buttons.push({
@@ -408,44 +417,50 @@ const MAX_BUTTON_LABEL_WIDTH = 24;
 /** 一行放满时允许的最大标签宽度，超过改为每行 2 个 */
 const SINGLE_ROW_MAX_LABEL_WIDTH = 20;
 
-/** 从选项整行生成按钮短标签：剥描述 → 剥 "(Recommended)" 后缀 → 超宽截断 */
-export function buildButtonLabel(optionLine: string): string {
-  let label = splitOptionLabel(optionLine);
-  label = label.replace(/\s*\(\s*recommended\s*\)\s*$/i, '').trim();
-  if (estimateLabelWidth(label) <= MAX_BUTTON_LABEL_WIDTH) return label;
+/** 从选项整行生成按钮短标签：剥描述 → 剥 "(Recommended)" 后缀 → 超宽截断。
+ * reserveWidth 为前缀（如选项序号）预留的显示宽度。 */
+export function buildButtonLabel(optionLine: string, reserveWidth = 0): string {
+  let label = stripRecommendedSuffix(splitOptionLabel(optionLine));
+  const max = MAX_BUTTON_LABEL_WIDTH - reserveWidth;
+  if (estimateLabelWidth(label) <= max) return label;
   let truncated = '';
   let width = 0;
   for (const ch of label) {
     const w = estimateLabelWidth(ch);
-    if (width + w > MAX_BUTTON_LABEL_WIDTH - 2) break;
+    if (width + w > max - 2) break;
     truncated += ch;
     width += w;
   }
   return `${truncated.trimEnd()}…`;
 }
 
+/** 剥掉框架渲染在选项标签尾部的 "(Recommended)" 标记 */
+export function stripRecommendedSuffix(label: string): string {
+  return label.replace(/\s*\(\s*recommended\s*\)\s*$/i, '').trim();
+}
+
 /**
  * 格式化多问题卡片中单题的文本部分（QQ 客户端原生 Markdown 渲染）。
  * 完整选项（含描述）放在正文里，按钮只放截断后的短标签。
+ * 正文选项用加粗序号，与按钮上的 ①②③ 前缀一一对应。
  */
 export function formatMultiQuestionCard(
   question: MultiQuestionDef,
   questionIndex: number,
   total: number,
 ): string {
-  const lines = [`**${questionIndex + 1}/${total} · ${question.header}**`];
+  const lines = [`**第 ${questionIndex + 1}/${total} 题 · ${question.header}**`];
   if (question.question.trim()) {
-    lines.push(question.question.trim());
+    lines.push('', question.question.trim());
   }
-  lines.push('');
-  for (const optionLine of question.options) {
-    const label = splitOptionLabel(optionLine);
+  for (const [optionIndex, optionLine] of question.options.entries()) {
+    const label = stripRecommendedSuffix(splitOptionLabel(optionLine));
     const desc = splitOptionDescription(optionLine);
-    lines.push(desc ? `- ${label}：${desc}` : `- ${label}`);
+    lines.push('', `**${optionIndex + 1}.** ${label}${desc ? ` —— ${desc}` : ''}`);
   }
-  lines.push('', '请点选下方按钮作答');
+  lines.push('', '👇 点下方按钮作答');
   if (question.isOther) {
-    lines.push(`选项不合适？点「✍️ 其他」后输入，或直接回复 "${questionIndex + 1}: 你的答案"`);
+    lines.push('', `选项不合适？点「✍️ 其他」后输入，或直接回复 "${questionIndex + 1}: 你的答案"`);
   }
   return lines.join('\n');
 }
@@ -700,17 +715,17 @@ export function formatMultiQuestionConfirmCard(
   questions: readonly MultiQuestionDef[],
   answers: ReadonlyMap<number, MultiQuestionAnswer>,
 ): string {
-  const lines = ['**全部题目已作答，请确认**', ''];
+  const lines = ['**✅ 答案确认**'];
   for (const [index, question] of questions.entries()) {
     const answer = answers.get(index);
     const display = !answer
       ? '（未作答）'
       : 'optionIndex' in answer
-        ? splitOptionLabel(question.options[answer.optionIndex] ?? '')
+        ? stripRecommendedSuffix(splitOptionLabel(question.options[answer.optionIndex] ?? ''))
         : answer.text;
-    lines.push(`${index + 1}. ${question.header}：${display}`);
+    lines.push('', `**${index + 1}.** ${question.header}：${display}`);
   }
-  lines.push('', '点「✅ 提交」自动发送答案；想改动就点「✏️ 改一改」编辑后手动发送。');
+  lines.push('', '点「✅ 提交」自动发送；想改动就点「✏️ 改一改」编辑后发送。');
   return lines.join('\n');
 }
 

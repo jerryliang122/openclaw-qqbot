@@ -431,7 +431,7 @@ test('buildButtonLabel：超宽截断加省略号', () => {
   assert.ok(estimateLabelWidth(label) <= 24);
 });
 
-test('formatMultiQuestionCard：正文含完整选项与描述', () => {
+test('formatMultiQuestionCard：正文含加粗序号 + 完整选项与描述，剥 (Recommended)', () => {
   const card = formatMultiQuestionCard(
     {
       header: '硬功夫方向',
@@ -441,11 +441,13 @@ test('formatMultiQuestionCard：正文含完整选项与描述', () => {
     0,
     2,
   );
-  assert.ok(card.includes('1/2'));
+  assert.ok(card.includes('第 1/2 题'));
   assert.ok(card.includes('硬功夫方向'));
   assert.ok(card.includes('往哪边补？'));
-  assert.ok(card.includes('- 调研/方案 (Recommended)：搜索、分析'));
-  assert.ok(card.includes('- 数据/文档'));
+  assert.ok(card.includes('**1.** 调研/方案 —— 搜索、分析'));
+  assert.ok(card.includes('**2.** 数据/文档'));
+  assert.ok(!card.includes('(Recommended)'));
+  assert.ok(card.includes('👇 点下方按钮作答'));
 });
 
 test('formatMultiQuestionCard：isOther 题带文字作答提示', () => {
@@ -460,13 +462,14 @@ test('formatMultiQuestionCard：isOther 题带文字作答提示', () => {
 
 console.log('\n=== 7. buildMultiQuestionKeyboard（自适应分行 + 其他按钮） ===');
 
-test('短标签：所有选项一行放满', () => {
+test('短标签：所有选项一行放满，标签带 ①② 序号前缀', () => {
   const keyboard = buildMultiQuestionKeyboard(MULTI_ID, 0, {
     header: '甲', question: 'q', options: ['a1', 'a2'],
   });
   assert.equal(keyboard.content!.rows.length, 1);
   assert.equal(keyboard.content!.rows[0].buttons.length, 2);
-  assert.equal(keyboard.content!.rows[0].buttons[0].render_data!.label, 'a1');
+  assert.equal(keyboard.content!.rows[0].buttons[0].render_data!.label, '① a1');
+  assert.equal(keyboard.content!.rows[0].buttons[1].render_data!.label, '② a2');
   assert.equal(keyboard.content!.rows[0].buttons[0].action!.data, `qqbot:qm:${MULTI_ID}:0:0`);
   assert.equal(keyboard.content!.rows[0].buttons[0].group_id, 'question-0');
 });
@@ -687,9 +690,9 @@ test('确认卡正文按题展示已选标签', () => {
     [1, { optionIndex: 0 }],
   ]);
   const text = formatMultiQuestionConfirmCard(questions, answers);
-  assert.ok(text.startsWith('**全部题目已作答，请确认**'));
-  assert.ok(text.includes(`1. ${PARSED_QUESTIONS[0]!.header}：`));
-  assert.ok(text.includes(`2. ${PARSED_QUESTIONS[1]!.header}：`));
+  assert.ok(text.startsWith('**✅ 答案确认**'));
+  assert.ok(text.includes(`**1.** ${PARSED_QUESTIONS[0]!.header}：`));
+  assert.ok(text.includes(`**2.** ${PARSED_QUESTIONS[1]!.header}：`));
   // 第 1 题第 3 项的标签应出现在正文里
   assert.ok(text.includes(splitOptionLabel(PARSED_QUESTIONS[0]!.options[2]!)));
 });
@@ -701,8 +704,8 @@ test('确认卡正文：isOther 文本答案原样展示，未答题标注', () 
     questions,
     new Map<number, MultiQuestionAnswer>([[0, { text: '自由内容' }]]),
   );
-  assert.ok(text.includes(`1. ${PARSED_QUESTIONS[0]!.header}：自由内容`));
-  assert.ok(text.includes(`2. ${PARSED_QUESTIONS[1]!.header}：（未作答）`));
+  assert.ok(text.includes(`**1.** ${PARSED_QUESTIONS[0]!.header}：自由内容`));
+  assert.ok(text.includes(`**2.** ${PARSED_QUESTIONS[1]!.header}：（未作答）`));
 });
 
 test('确认卡键盘：两个指令按钮携带完整答案文本', () => {

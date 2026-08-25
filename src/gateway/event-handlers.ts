@@ -347,7 +347,7 @@ async function sendMultiQuestionConfirmCard(
   const questions = getPendingMultiQuestions(questionId);
   const cardText = questions
     ? formatMultiQuestionConfirmCard(questions, answers)
-    : `**全部题目已作答，请确认**\n\n${answerText}`;
+    : `**✅ 答案确认**\n\n${answerText}`;
 
   const bot = tryGetBotForAccount(account.accountId);
   if (!bot) {
