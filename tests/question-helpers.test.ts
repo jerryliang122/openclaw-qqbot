@@ -18,10 +18,23 @@ import {
   registerPendingMultiQuestion,
   recordMultiQuestionTap,
   mergeMultiQuestionTextAnswers,
+  submitMultiQuestionAnswers,
   findPendingMultiQuestionByConversation,
   markMultiQuestionResolved,
   markMultiQuestionResolveFailed,
+  _overrideQuestionGatewayRuntimeForTests,
+  type MultiQuestionAnswer,
 } from '../src/features/question-helpers.js';
+
+/** 把 complete 结果的答案快照渲染成 "题号: 值" 文本便于断言（选项序号 1-based） */
+function answerSnapshotText(result: {
+  answers: ReadonlyMap<number, MultiQuestionAnswer>;
+}): string {
+  return [...result.answers.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([idx, a]) => `${idx + 1}: ${'optionIndex' in a ? a.optionIndex + 1 : a.text}`)
+    .join('\n');
+}
 
 function test(name: string, fn: () => void) {
   try {
@@ -566,7 +579,7 @@ test('会话索引：登记后可按会话查到，终态后查不到', () => {
   assert.equal(findPendingMultiQuestionByConversation('c2c', 'peer-1'), undefined);
 });
 
-test('逐题缓冲 -> 集齐后 complete 并给出合成回复文本', () => {
+test('逐题缓冲 -> 集齐后 complete 并携带答案快照', () => {
   resetPending();
 
   const first = recordMultiQuestionTap(MULTI_ID, 0, 2);
@@ -581,8 +594,10 @@ test('逐题缓冲 -> 集齐后 complete 并给出合成回复文本', () => {
   const second = recordMultiQuestionTap(MULTI_ID, 1, 0);
   assert.equal(second.status, 'complete');
   if (second.status === 'complete') {
-    // "1: 3" -> 第 1 题选第 3 项；"2: 1" -> 第 2 题选第 1 项
-    assert.equal(second.replyText, '1: 3\n2: 1');
+    // 第 1 题选第 3 项；第 2 题选第 1 项
+    assert.equal(answerSnapshotText(second), '1: 3\n2: 1');
+    assert.deepEqual(second.answers.get(0), { optionIndex: 2 });
+    assert.deepEqual(second.answers.get(1), { optionIndex: 0 });
   }
 
   // 提交后为终态
@@ -597,7 +612,7 @@ test('同题重复点选，最后一次为准', () => {
   const second = recordMultiQuestionTap(MULTI_ID, 1, 1);
   assert.equal(second.status, 'complete');
   if (second.status === 'complete') {
-    assert.equal(second.replyText, '1: 2\n2: 2');
+    assert.equal(answerSnapshotText(second), '1: 2\n2: 2');
   }
 });
 
@@ -607,7 +622,7 @@ test('乱序作答也按题序输出', () => {
   const first = recordMultiQuestionTap(MULTI_ID, 0, 0);
   assert.equal(first.status, 'complete');
   if (first.status === 'complete') {
-    assert.equal(first.replyText, '1: 1\n2: 4');
+    assert.equal(answerSnapshotText(first), '1: 1\n2: 4');
   }
 });
 
@@ -627,7 +642,7 @@ test('派发失败复位后可再次触发 complete', () => {
   const retry = recordMultiQuestionTap(MULTI_ID, 1, 1);
   assert.equal(retry.status, 'complete');
   if (retry.status === 'complete') {
-    assert.equal(retry.replyText, '1: 1\n2: 2');
+    assert.equal(answerSnapshotText(retry), '1: 1\n2: 2');
   }
 });
 
@@ -677,7 +692,7 @@ test('isOther 题接受自由文本并按原文合成', () => {
   const merged = mergeMultiQuestionTextAnswers(MULTI_ID, [{ index: 2, value: '2' }]);
   assert.equal(merged.status, 'complete');
   if (merged.status === 'complete') {
-    assert.equal(merged.replyText, '1: 2\n2: 2');
+    assert.equal(answerSnapshotText(merged), '1: 2\n2: 2');
   }
 });
 
@@ -689,7 +704,7 @@ test('isOther 题自由文本直通', () => {
   ]);
   assert.equal(merged.status, 'complete');
   if (merged.status === 'complete') {
-    assert.equal(merged.replyText, '1: 我想自己写答案\n2: 1');
+    assert.equal(answerSnapshotText(merged), '1: 我想自己写答案\n2: 1');
   }
 });
 
@@ -702,7 +717,7 @@ test('非 isOther 题接受选项序号 / 选项标签', () => {
   ]);
   assert.equal(byLabel.status, 'complete');
   if (byLabel.status === 'complete') {
-    assert.equal(byLabel.replyText, '1: 4\n2: 2');
+    assert.equal(answerSnapshotText(byLabel), '1: 4\n2: 2');
   }
 });
 
@@ -729,7 +744,7 @@ test('文字答案覆盖同题的按钮答案（最后一次为准）', () => {
   ]);
   assert.equal(merged.status, 'complete');
   if (merged.status === 'complete') {
-    assert.equal(merged.replyText, '1: 3\n2: 1');
+    assert.equal(answerSnapshotText(merged), '1: 3\n2: 1');
   }
 });
 
@@ -743,6 +758,116 @@ test('部分校验失败时整条 nomatch，不部分写入', () => {
   // 第 1 题没有被写入
   const after = recordMultiQuestionTap(MULTI_ID, 0, 0);
   assert.equal(after.status, 'buffered');
+});
+
+console.log('\n=== 11. 整单提交（questionGatewayRuntime.resolveAnswers） ===');
+
+test('host 未导出 resolveAnswers -> unsupported（不抛错）', async () => {
+  _overrideQuestionGatewayRuntimeForTests({
+    resolveOption: async () => ({ status: 'answered' }),
+  });
+  try {
+    const result = await submitMultiQuestionAnswers({
+      cfg: {},
+      questionId: MULTI_ID,
+      total: 2,
+      answers: new Map([[0, { optionIndex: 1 }], [1, { optionIndex: 0 }]]),
+    });
+    assert.deepEqual(result, { status: 'unsupported' });
+  } finally {
+    _overrideQuestionGatewayRuntimeForTests(null);
+  }
+});
+
+test('answered：按题号顺序转成位置答案数组提交', async () => {
+  const calls: Array<Record<string, unknown>> = [];
+  _overrideQuestionGatewayRuntimeForTests({
+    resolveOption: async () => ({ status: 'answered' }),
+    resolveAnswers: async (params) => {
+      calls.push(JSON.parse(JSON.stringify(params)));
+      return { status: 'answered' };
+    },
+  });
+  try {
+    const result = await submitMultiQuestionAnswers({
+      cfg: { marker: 'cfg' },
+      questionId: MULTI_ID,
+      total: 2,
+      answers: new Map([[1, { optionIndex: 0 }], [0, { text: '自由答案' }]]),
+      senderId: 'user-openid',
+    });
+    assert.deepEqual(result, { status: 'answered' });
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0], {
+      cfg: { marker: 'cfg' },
+      questionId: MULTI_ID,
+      answers: [{ text: '自由答案' }, { optionIndex: 0 }],
+      senderId: 'user-openid',
+      clientDisplayName: 'QQBot question',
+    });
+  } finally {
+    _overrideQuestionGatewayRuntimeForTests(null);
+  }
+});
+
+test('already-terminal：竞态终态返回而非抛错', async () => {
+  _overrideQuestionGatewayRuntimeForTests({
+    resolveOption: async () => ({ status: 'answered' }),
+    resolveAnswers: async () => ({ status: 'already-terminal', reason: 'already-terminal' }),
+  });
+  try {
+    const result = await submitMultiQuestionAnswers({
+      cfg: {},
+      questionId: MULTI_ID,
+      total: 1,
+      answers: new Map([[0, { optionIndex: 0 }]]),
+    });
+    assert.deepEqual(result, { status: 'already-terminal' });
+  } finally {
+    _overrideQuestionGatewayRuntimeForTests(null);
+  }
+});
+
+test('gateway 异常向上抛（调用方负责 markFailed + 回执）', async () => {
+  _overrideQuestionGatewayRuntimeForTests({
+    resolveOption: async () => ({ status: 'answered' }),
+    resolveAnswers: async () => {
+      throw new Error('gateway down');
+    },
+  });
+  try {
+    await assert.rejects(
+      submitMultiQuestionAnswers({
+        cfg: {},
+        questionId: MULTI_ID,
+        total: 1,
+        answers: new Map([[0, { optionIndex: 0 }]]),
+      }),
+      /gateway down/,
+    );
+  } finally {
+    _overrideQuestionGatewayRuntimeForTests(null);
+  }
+});
+
+test('答案缺失防御：快照不全时抛错', async () => {
+  _overrideQuestionGatewayRuntimeForTests({
+    resolveOption: async () => ({ status: 'answered' }),
+    resolveAnswers: async () => ({ status: 'answered' }),
+  });
+  try {
+    await assert.rejects(
+      submitMultiQuestionAnswers({
+        cfg: {},
+        questionId: MULTI_ID,
+        total: 2,
+        answers: new Map([[0, { optionIndex: 0 }]]),
+      }),
+      /missing answer for question 2/,
+    );
+  } finally {
+    _overrideQuestionGatewayRuntimeForTests(null);
+  }
 });
 
 console.log('\n==================================================');

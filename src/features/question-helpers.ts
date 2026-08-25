@@ -7,7 +7,9 @@
  * - parseQuestionButtonData / parseMultiQuestionButtonData: 解析 INTERACTION_CREATE 的 button_data
  * - isAskUserPayload / isNonSingleAskUserPayload: 判断 payload 是否为 ask_user（单/非单问题）
  * - parseMultiQuestionPrompt: 从多问题投递文本反解题目结构
- * - registerPendingMultiQuestion 等: 多问题答案暂存 store（集齐后合成文本走入站通道）
+ * - registerPendingMultiQuestion 等: 多问题答案暂存 store
+ * - submitMultiQuestionAnswers: 集齐后通过 questionGatewayRuntime.resolveAnswers
+ *   整单 resolve（不合成入站消息，见 event-handlers 顶部注释）
  */
 
 import type { InlineKeyboard, KeyboardButton } from '../types.js';
@@ -53,6 +55,17 @@ export interface ParsedMultiQuestionAction {
   optionIndex: number;
 }
 
+/** 一次多问题整单提交的答案（题号 -> 按钮选项序号或自由文本） */
+export type MultiQuestionAnswer = { optionIndex: number } | { text: string };
+
+export type MultiQuestionAnswerInput = { optionIndex: number; text?: never } | { text: string; optionIndex?: never };
+
+export type MultiQuestionSubmitResult =
+  | { status: 'answered' }
+  | { status: 'already-terminal' }
+  /** host 版本过旧，questionGatewayRuntime 未导出 resolveAnswers */
+  | { status: 'unsupported' };
+
 export interface QuestionGatewayRuntime {
   resolveOption: (params: {
     cfg: unknown;
@@ -62,6 +75,18 @@ export interface QuestionGatewayRuntime {
     gatewayUrl?: string;
     clientDisplayName?: string;
   }) => Promise<{ status: string }>;
+  /**
+   * 整单提交多问题答案（openclaw 需带 resolveAnswers 导出）。
+   * 按题号位置映射到记录的 canonical 选项，避免通道侧反解 question id。
+   */
+  resolveAnswers?: (params: {
+    cfg: unknown;
+    questionId: string;
+    answers: ReadonlyArray<MultiQuestionAnswerInput>;
+    senderId?: string;
+    gatewayUrl?: string;
+    clientDisplayName?: string;
+  }) => Promise<{ status: 'answered' } | { status: 'already-terminal'; reason: string }>;
 }
 
 let questionRuntimePromise: Promise<QuestionGatewayRuntime | null> | undefined;
@@ -78,6 +103,13 @@ export function getQuestionGatewayRuntime(): Promise<QuestionGatewayRuntime | nu
     })
     .catch(() => null);
   return questionRuntimePromise;
+}
+
+/** @internal 测试注入用：覆盖缓存的 question gateway runtime */
+export function _overrideQuestionGatewayRuntimeForTests(
+  runtime: QuestionGatewayRuntime | null,
+): void {
+  questionRuntimePromise = runtime ? Promise.resolve(runtime) : undefined;
 }
 
 // ============ Payload Detection ============
@@ -502,9 +534,6 @@ export function parseMultiQuestionButtonData(buttonData: string): ParsedMultiQue
 
 // ============ 多问题答案暂存 Store ============
 
-/** 一题的答案：按钮点选（选项序号）或自由文本（isOther 题） */
-type MultiQuestionAnswer = { optionIndex: number } | { text: string };
-
 interface PendingMultiQuestion {
   scope: 'c2c' | 'group';
   targetId: string;
@@ -592,20 +621,13 @@ export type MultiQuestionTapResult =
       status: 'complete';
       total: number;
       /**
-       * 按题序号定位的合成回复文本（如 "1: 3\n2: 1" 或 "1: 3\n2: 自由文本"）。
-       * 作为普通用户消息走入站通道后，框架的文本应答解析器会把它
-       * 解析成各题答案并 resolve 挂起的 ask_user。
+       * 题号 -> 答案 的快照（complete 时刻的拷贝）。
+       * 最终提交直接走 questionGatewayRuntime.resolveAnswers 整单 resolve，
+       * 不再合成入站文本——合成消息会被框架当成 steering 注入挂起的 run，
+       * 永远到不了 pending ask_user 的 claim（生产 2026-08-24 事故）。
        */
-      replyText: string;
+      answers: ReadonlyMap<number, MultiQuestionAnswer>;
     };
-
-function buildMultiQuestionReplyText(entry: PendingMultiQuestion): string {
-  return [...entry.answers.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([questionIdx, answer]) =>
-      `${questionIdx + 1}: ${'optionIndex' in answer ? answer.optionIndex + 1 : answer.text}`)
-    .join('\n');
-}
 
 function bufferedOrComplete(entry: PendingMultiQuestion): MultiQuestionTapResult {
   if (entry.answers.size < entry.questions.length) {
@@ -621,7 +643,7 @@ function bufferedOrComplete(entry: PendingMultiQuestion): MultiQuestionTapResult
   return {
     status: 'complete',
     total: entry.questions.length,
-    replyText: buildMultiQuestionReplyText(entry),
+    answers: new Map(entry.answers),
   };
 }
 
@@ -753,10 +775,45 @@ export function markMultiQuestionResolved(questionId: string): void {
   }
 }
 
-/** 入站派发失败后复位，允许用户再点一次触发重试 */
+/** 整单提交失败后复位，允许用户再点一次触发重试 */
 export function markMultiQuestionResolveFailed(questionId: string): void {
   const entry = pendingMultiQuestions.get(questionId);
   if (entry) {
     entry.resolving = false;
   }
+}
+
+/**
+ * 把集齐的多问题答案整单提交给框架（question.resolve，与单问题按钮同一条
+ * 已被生产验证的 gateway 通道）。位置序号由框架侧映射到记录的 canonical
+ * 选项，插件不需要反解 question id。调用方负责 markResolved/markFailed。
+ */
+export async function submitMultiQuestionAnswers(params: {
+  cfg: unknown;
+  questionId: string;
+  total: number;
+  answers: ReadonlyMap<number, MultiQuestionAnswer>;
+  senderId?: string;
+  clientDisplayName?: string;
+}): Promise<MultiQuestionSubmitResult> {
+  const questionRuntime = await getQuestionGatewayRuntime();
+  if (!questionRuntime?.resolveAnswers || typeof questionRuntime.resolveAnswers !== 'function') {
+    return { status: 'unsupported' };
+  }
+  const positional: MultiQuestionAnswerInput[] = [];
+  for (let index = 0; index < params.total; index++) {
+    const answer = params.answers.get(index);
+    if (!answer) {
+      throw new Error(`missing answer for question ${index + 1}/${params.total}`);
+    }
+    positional.push('optionIndex' in answer ? { optionIndex: answer.optionIndex } : { text: answer.text });
+  }
+  const result = await questionRuntime.resolveAnswers({
+    cfg: params.cfg,
+    questionId: params.questionId,
+    answers: positional,
+    senderId: params.senderId,
+    clientDisplayName: params.clientDisplayName ?? 'QQBot question',
+  });
+  return result.status === 'answered' ? { status: 'answered' } : { status: 'already-terminal' };
 }

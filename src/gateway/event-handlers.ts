@@ -21,12 +21,14 @@ import {
   parseKeyedAnswerText,
   recordMultiQuestionTap,
   mergeMultiQuestionTextAnswers,
+  submitMultiQuestionAnswers,
   findPendingMultiQuestionByConversation,
   markMultiQuestionResolved,
   markMultiQuestionResolveFailed,
+  type MultiQuestionAnswer,
 } from '../features/question-helpers.js';
 import { recordKnownUser } from '../features/proactive.js';
-import { cacheMsgId, getCachedMsgId } from '../features/msgid-cache.js';
+import { cacheMsgId } from '../features/msgid-cache.js';
 import { getAdapters } from '../adapter/resolve.js';
 import { resolveGroupConfigFromAccount, resolveGroupPolicy, resolveMentionPatterns } from '../config.js';
 import { getPackageVersion } from '../utils/pkg-version.js';
@@ -130,12 +132,13 @@ async function tryConsumeMultiQuestionTextAnswer(
       return true;
     }
     if (merged.status === 'complete') {
-      await dispatchMultiQuestionAnswer(
-        merged.replyText,
+      await resolveMultiQuestionAnswer(
         pending.questionId,
+        merged.total,
+        merged.answers,
+        msg.senderId,
         scope,
         msg.replyTarget.targetId,
-        msg.senderId,
         account,
         runtime,
         log,
@@ -331,10 +334,14 @@ async function handleQuestion(
 }
 
 // ── 多问题按钮处理（ask_user questions >= 2）──
-// 框架对多问题记录没有按钮解析通道（question.resolve 只接受整单提交，
-// resolveOption 仅支持单问题），这里按题缓冲点选，集齐后把
-// "1: 3\n2: 1" 这样的合成回复当作普通用户消息走入站通道，
-// 由框架的文本应答解析器（claimPendingAgentQuestionAnswer）完成 resolve。
+// 框架对多问题记录没有单题按钮解析通道（resolveOption 仅支持单问题），
+// 这里按题缓冲点选，集齐后通过 questionGatewayRuntime.resolveAnswers
+// 整单 resolve 问题记录——与单问题按钮同一条 gateway 通道，resolve 提交
+// 后框架侧 waitAnswer 返回、挂起的 ask_user turn 恢复运行。
+// 注意：不要退回"合成一条用户文本走入站通道"的旧方案——合成消息会被
+// 框架当成 steering 注入挂起的 run（isInboundUserMessage/fingerprint
+// 配套缺失，claim 不触发），答案永远到不了 pending question（生产
+// 2026-08-24 事故：问题 6 分钟超时、模型未恢复）。
 
 async function handleMultiQuestionTap(
   parsed: ParsedMultiQuestionAction,
@@ -346,12 +353,16 @@ async function handleMultiQuestionTap(
   const operatorId = resolveOperatorId(event);
   const scope: 'group' | 'c2c' = event.group_openid ? 'group' : 'c2c';
   const peerId = (scope === 'group' ? event.group_openid : event.user_openid) ?? '';
-  if (!peerId) return; // 缺少会话定位信息，无法回执或合成派发
+  if (!peerId) return; // 缺少会话定位信息，无法回执或提交
+
+  log.info(
+    `[question] multi tap id=${parsed.questionId} q=${parsed.questionIndex + 1} opt=${parsed.optionIndex + 1} operator=${operatorId ?? 'unknown'}`,
+  );
 
   const tap = recordMultiQuestionTap(parsed.questionId, parsed.questionIndex, parsed.optionIndex);
 
   if (tap.status === 'unknown' || tap.status === 'terminal') {
-    log.debug(`[question] multi tap ignored id=${parsed.questionId} status=${tap.status}`);
+    log.info(`[question] multi tap ignored id=${parsed.questionId} status=${tap.status}`);
     await sendMultiQuestionFeedback(event, account, '该问题已提交或已过期');
     return;
   }
@@ -361,7 +372,7 @@ async function handleMultiQuestionTap(
   }
   if (tap.status === 'buffered') {
     const pendingTitles = tap.pendingQuestions.map((q) => q.header);
-    log.debug(`[question] multi buffered id=${parsed.questionId} answered=${tap.answeredCount}/${tap.total}`);
+    log.info(`[question] multi buffered id=${parsed.questionId} answered=${tap.answeredCount}/${tap.total}`);
     await sendMultiQuestionFeedback(
       event,
       account,
@@ -372,13 +383,14 @@ async function handleMultiQuestionTap(
   // 按钮点选路径不会产生 nomatch（选项序号来自键盘本身）
   if (tap.status !== 'complete') return;
 
-  // complete：合成一条用户文本回复走入站通道
-  await dispatchMultiQuestionAnswer(
-    tap.replyText,
+  // complete：整单提交给框架
+  await resolveMultiQuestionAnswer(
     parsed.questionId,
+    tap.total,
+    tap.answers,
+    operatorId,
     scope,
     peerId,
-    operatorId,
     account,
     runtime,
     log,
@@ -386,54 +398,53 @@ async function handleMultiQuestionTap(
 }
 
 /**
- * 把集齐的多问题答案合成为一条"用户文本回复"并入站派发。
- * messageId 优先取该会话最近的真实 msg_id（msgid-cache），让后续回复
- * 能挂被动引用；取不到时留空，回复走主动发送。
+ * 把集齐的多问题答案整单 resolve 给框架。
+ * 走 questionGatewayRuntime.resolveAnswers（question.get + question.resolve），
+ * 不经过入站派发——挂起的 ask_user turn 由框架侧 waitAnswer 唤醒，
+ * 后续模型输出仍从原始 turn 的投递管线发出（被动回复额度沿用原 msg_id）。
  */
-async function dispatchMultiQuestionAnswer(
-  replyText: string,
+async function resolveMultiQuestionAnswer(
   questionId: string,
+  total: number,
+  answers: ReadonlyMap<number, MultiQuestionAnswer>,
+  senderId: string | undefined,
   scope: 'c2c' | 'group',
   peerId: string,
-  senderId: string | undefined,
   account: ResolvedQQBotAccount,
   runtime: PluginRuntime,
   log: PluginLogger,
 ): Promise<void> {
-  const syntheticMsg: QQBotInboundMessage = {
-    rawEventType: scope === 'group' ? 'GROUP_AT_MESSAGE_CREATE' : 'C2C_MESSAGE_CREATE',
-    kind: scope,
-    senderId: senderId ?? peerId,
-    senderName: undefined,
-    content: replyText,
-    messageId: getCachedMsgId(scope, peerId) || '',
-    timestamp: new Date().toISOString(),
-    replyTarget: { scope, targetId: peerId },
-    raw: {},
-  } as unknown as QQBotInboundMessage;
-  const syntheticCtx = {
-    message: syntheticMsg,
-    replyTarget: syntheticMsg.replyTarget,
-    state: {},
-    signal: undefined,
-  } as unknown as MiddlewareContext;
-
-  const qualifiedTarget = scope === 'group' ? `qqbot:group:${peerId}` : `qqbot:c2c:${peerId}`;
+  const cfg = getAdapters(runtime).getConfig?.() ?? {};
   try {
-    await runWithRequestContext(
-      {
-        target: qualifiedTarget,
-        accountId: account.accountId,
-        messageId: syntheticMsg.messageId || undefined,
-        openId: senderId,
-      },
-      () => dispatchToOpenClaw(syntheticCtx, syntheticMsg, account, runtime, log.child('questionDispatch')),
+    const result = await submitMultiQuestionAnswers({
+      cfg,
+      questionId,
+      total,
+      answers,
+      senderId,
+      clientDisplayName: 'QQBot question',
+    });
+    if (result.status === 'answered') {
+      markMultiQuestionResolved(questionId);
+      log.info(`[question] multi answer submitted id=${questionId}`);
+      return;
+    }
+    if (result.status === 'already-terminal') {
+      // 已在框架侧结束（过期/取消/被别的通道抢先提交）——对用户等价于完成
+      markMultiQuestionResolved(questionId);
+      log.info(`[question] multi answer raced terminal state id=${questionId}`);
+      await sendMultiQuestionFeedbackText(scope, peerId, account, '该问题已提交或已过期');
+      return;
+    }
+    // unsupported：host 版本过旧，未导出 resolveAnswers
+    markMultiQuestionResolveFailed(questionId);
+    log.error(
+      `[question] host does not export resolveAnswers; multi-question submit requires a newer openclaw id=${questionId}`,
     );
-    markMultiQuestionResolved(questionId);
-    log.debug(`[question] multi answer dispatched id=${questionId}`);
+    await sendMultiQuestionFeedbackText(scope, peerId, account, '⚠️ 当前 OpenClaw 版本不支持多问题提交，请升级后重试');
   } catch (err) {
     markMultiQuestionResolveFailed(questionId);
-    log.error(`[question] multi dispatch error: ${err instanceof Error ? err.message : String(err)}`);
+    log.error(`[question] multi submit error id=${questionId}: ${err instanceof Error ? err.message : String(err)}`);
     await sendMultiQuestionFeedbackText(scope, peerId, account, '⚠️ 提交失败，请重新点选或直接文字回复');
   }
 }
