@@ -29,6 +29,7 @@ import { getPersistedRefIndexStore } from '../features/ref-index-store.js';
 import { createPolicyInjector } from '../middleware/policy-injector.js';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.js';
 import { dynamicAccessControl } from '../middleware/access-control.js';
+import { secretCapture } from '../middleware/secret-capture.js';
 import { c2cTypingIndicator } from '../middleware/typing.js';
 import { stripMentionText } from '../utils/mention.js';
 import { groupMessageCoalescer } from '../features/message-coalescer.js';
@@ -86,6 +87,12 @@ export function setupMiddlewares(bot: QQBot, account: ResolvedQQBotAccount, opts
   //    依赖：ctx.state.policy（policyInjector, #3）、ctx.message.*（原始消息）
   const slash = slashCommand({ commands: buildCommandList(account, { getRuntime: opts.getRuntime }) });
   bot.use(slash.middleware);
+
+  // 9.5 密钥捕获 — pending 密钥输入时拦截该 c2c 用户的下一条文本消息，
+  //     就地执行 openclaw secrets store set 并直接回执，消息不进框架
+  //     （密钥绝不进入 AI 转录）。放在斜杠命令之后：/bot-* 优先可用；
+  //     拦截后不再触发 typing / envelope；多问题 ask_user 答案消息红线放行
+  bot.use(secretCapture({ accountId: account.accountId }));
 
   // 10. 群聊消息合并中间件
   //     - 群聊：所有消息都应该被处理，快速消息应该被合并

@@ -14,6 +14,7 @@ import { qqbotPlugin } from './src/channel.js';
 import { setQQBotRuntime } from './src/runtime.js';
 import { registerPlatformTool } from './src/tools/platform.js';
 import { registerRemindTool } from './src/tools/remind.js';
+import { registerSecretInputTool } from './src/tools/secret-input.js';
 import { verifyRuntimeContract } from './src/adapter/contract.js';
 
 let registered = false;
@@ -41,6 +42,7 @@ const plugin = {
     api.registerChannel({ plugin: qqbotPlugin as any });
     registerPlatformTool(api);
     registerRemindTool(api);
+    registerSecretInputTool(api);
   },
 };
 
