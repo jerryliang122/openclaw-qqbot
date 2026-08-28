@@ -745,6 +745,13 @@ declare module "openclaw/plugin-sdk/setup-tools" {
   export function formatDocsLink(href: string, text?: string): string;
 }
 
+// 2026.8.1-beta 起 openclaw 发布包明确排除该子路径的 .d.ts（files 列表
+// "!dist/plugin-sdk/text-utility-runtime.d.ts"），运行时导出仍在。
+// 仅声明本项目实际使用的函数（签名对齐 dist/utf16-slice-*.js）。
+declare module "openclaw/plugin-sdk/text-utility-runtime" {
+  export function truncateUtf16Safe(input: string, maxLen: number): string;
+}
+
 declare module "openclaw/plugin-sdk/core" {
   export type OpenClawConfig = import("openclaw/plugin-sdk").OpenClawConfig;
   export type ChannelPlugin<TAccount = unknown> =
