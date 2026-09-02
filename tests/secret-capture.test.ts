@@ -2,17 +2,21 @@
  * secret-input 全链路单元测试
  *
  * 覆盖：
- * - secret-store-cli：name 校验 / kind 判定 / 掩码 / argv 拼装 / spawn 注入执行
+ * - secret-store-cli：name 校验 / 掩码 / argv 拼装 / CLI 入口解析优先级 / spawn 注入执行
  * - secret-input-store：登记 / 一次性消费 / 覆盖 / 取消 / TTL
  * - secret-capture 中间件：命中消费、取消、空输入保留、多问题红线放行、
  *   群聊放行、失败回执、quota 降级
  */
 import { strict as assert } from 'node:assert';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
+  __resetCachedCliForTest,
   buildSecretsStoreSetArgs,
   isValidSecretName,
   maskSecret,
-  resolveSecretKind,
+  resolveOpenClawCli,
   runSecretsStoreSet,
   scrubSecret,
   type SpawnFn,
@@ -54,7 +58,7 @@ function test(name: string, fn: () => void | Promise<void>): Promise<void> {
 
 // ============ 1. secret-store-cli 纯函数 ============
 
-console.log('\n=== 1. isValidSecretName / resolveSecretKind ===');
+console.log('\n=== 1. isValidSecretName ===');
 
 await test('合法变量名', () => {
   assert.equal(isValidSecretName('LOG_LEVEL'), true);
@@ -71,22 +75,6 @@ await test('非法变量名被拒', () => {
   assert.equal(isValidSecretName('X'.repeat(129)), false);
   assert.equal(isValidSecretName(''), false);
   assert.equal(isValidSecretName('FOO; rm -rf /'), false);
-});
-
-await test('kind 后缀自动判定', () => {
-  assert.equal(resolveSecretKind('GITHUB_TOKEN'), 'secret');
-  assert.equal(resolveSecretKind('OPENWEATHER_API_KEY'), 'secret');
-  assert.equal(resolveSecretKind('DB_PASSWORD'), 'secret');
-  assert.equal(resolveSecretKind('TLS_PRIVATE_KEY'), 'secret');
-  assert.equal(resolveSecretKind('JWT_SECRET'), 'secret');
-  assert.equal(resolveSecretKind('LOG_LEVEL'), 'env');
-  assert.equal(resolveSecretKind('BASE_URL'), 'env');
-});
-
-await test('kind 显式指定覆盖后缀判定', () => {
-  assert.equal(resolveSecretKind('GITHUB_TOKEN', 'env'), 'env');
-  assert.equal(resolveSecretKind('LOG_LEVEL', 'secret'), 'secret');
-  assert.equal(resolveSecretKind('LOG_LEVEL', undefined), 'env');
 });
 
 console.log('\n=== 2. maskSecret / scrubSecret ===');
@@ -130,6 +118,75 @@ await test('secret kind 走 --value-file -（stdin）', () => {
     '--value-file',
     '-',
   ]);
+});
+
+// ============ 3b. CLI 入口解析优先级 ============
+
+console.log('\n=== 3b. resolveOpenClawCli 优先级 ===');
+
+/** 造一个假包（含 package.json，可选 bin），返回包根 */
+function writeFakePackage(dir: string, name: string, bin?: string): string {
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'package.json'),
+    JSON.stringify({ name, ...(bin ? { bin: { openclaw: bin } } : {}) }),
+  );
+  return dir;
+}
+
+/** 临时替换 process.argv[1] 并清掉 CLI 解析缓存，结束后还原 */
+function withArgv1(fake: string | undefined, fn: () => void): void {
+  const orig = process.argv[1];
+  if (fake === undefined) process.argv.splice(1, 1);
+  else process.argv[1] = fake;
+  __resetCachedCliForTest();
+  try {
+    fn();
+  } finally {
+    if (orig === undefined) process.argv.splice(1, 0, undefined as unknown as string);
+    else process.argv[1] = orig;
+    __resetCachedCliForTest();
+  }
+}
+
+await test('优先用网关自身安装（process.argv[1] 所在的 openclaw 包）', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-cli-'));
+  const gwRoot = writeFakePackage(path.join(tmp, 'gateway-openclaw'), 'openclaw', 'openclaw.mjs');
+  const entry = path.join(gwRoot, 'dist', 'index.js');
+  fs.mkdirSync(path.dirname(entry), { recursive: true });
+  withArgv1(entry, () => {
+    const cli = resolveOpenClawCli();
+    assert.equal(cli.cmd, process.execPath);
+    assert.equal(cli.args[0], path.join(gwRoot, 'openclaw.mjs'));
+  });
+});
+
+await test('argv[1] 在 openclaw 的嵌套依赖里 → 跳过内层包，定位外层 openclaw', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-cli-'));
+  const ocRoot = writeFakePackage(path.join(tmp, 'openclaw'), 'openclaw', 'openclaw.mjs');
+  const nested = writeFakePackage(path.join(ocRoot, 'node_modules', 'worker'), 'worker');
+  const entry = path.join(nested, 'run.js');
+  withArgv1(entry, () => {
+    const cli = resolveOpenClawCli();
+    assert.equal(cli.args[0], path.join(ocRoot, 'openclaw.mjs'));
+  });
+});
+
+await test('argv[1] 在无关包内 → 不误用该包，回退其他解析', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qqbot-cli-'));
+  const appRoot = writeFakePackage(path.join(tmp, 'myapp'), 'myapp', 'server.js');
+  withArgv1(path.join(appRoot, 'server.js'), () => {
+    const cli = resolveOpenClawCli();
+    const joined = `${cli.cmd} ${cli.args.join(' ')}`;
+    assert.ok(!joined.includes('myapp'), `不应解析到无关包: ${joined}`);
+  });
+});
+
+await test('argv[1] 缺失 → 回退 require.resolve / PATH，不抛错', () => {
+  withArgv1(undefined, () => {
+    const cli = resolveOpenClawCli();
+    assert.ok(cli.cmd === 'openclaw' || cli.cmd === process.execPath);
+  });
 });
 
 // ============ 4. spawn 注入执行 ============

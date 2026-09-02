@@ -4,10 +4,15 @@
  * 把用户在聊天中发送的密钥值通过 `openclaw secrets store set` 写入
  * OpenClaw 密钥库（CLI 直写本地共享状态，绕过 Gateway）。
  *
- * kind 规则（与 openclaw CLI 对齐）：
- * - env：非敏感环境变量，`--value` 传参，事后可 `secrets store get` 读回
- * - secret：真正的密钥，CLI 拒绝 `--value`（防 shell 历史/进程列表泄漏），
- *   必须走 `--value-file -`（stdin）写入，write-only 不可读回
+ * kind 规则（openclaw 2026.9+ 两级模型）：
+ * - env：代理可读环境变量，`--value` 传参，事后可 `secrets store get` 读回
+ * - secret：「受保护的机密」，write-only 代理不可读，CLI 拒绝 `--value`，
+ *   必须走 `--value-file -`（stdin）写入
+ *
+ * 聊天卡片流程（qqbot_secret_input → secretCapture）**恒用 env**：
+ * 卡片收来的值本就留在 QQ 聊天记录里，且 AI 随后要读取使用，存成
+ * write-only 的 secret 反而用不了（2026-08-30 用户反馈）。执行器保留
+ * secret/stdin 分支仅作通用能力，当前没有调用方产生该 kind。
  *
  * 安全约束：
  * - spawn 恒为 args 数组 + shell 缺省（不经过 shell），值不参与任何
@@ -22,16 +27,18 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 
-const require_ = createRequire(import.meta.url);
+// CJS 兼容：__filename 在 CJS 中可用，ESM 中使用 import.meta.url
+const __file = typeof __filename !== 'undefined'
+  ? __filename
+  : fileURLToPath(import.meta.url);
+const require_ = createRequire(__file);
 
 export type SecretStoreKind = 'env' | 'secret';
 
 /** CLI 同款命名规则：^[A-Z][A-Z0-9_]{0,127}$ */
 const SECRET_NAME_RE = /^[A-Z][A-Z0-9_]{0,127}$/;
-
-/** 命名后缀命中即判定为 secret（与 CLI 自动检测一致） */
-const SECRET_SUFFIX_RE = /_(API_KEY|TOKEN|PASSWORD|PRIVATE_KEY|SECRET)$/;
 
 /** CLI 单值上限 64 KiB（超出 CLI 直接 exit 2，插件侧提前拦截） */
 export const SECRET_VALUE_MAX_BYTES = 65_536;
@@ -41,16 +48,10 @@ const RELOAD_TIMEOUT_MS = 15_000;
 /** 子进程输出保留上限（诊断用，已 scrub） */
 const OUTPUT_CAP_CHARS = 2_000;
 
-// ── 校验 / 判定 / 掩码 ─────────────────────────────────────────────────────
+// ── 校验 / 掩码 ────────────────────────────────────────────────────────────
 
 export function isValidSecretName(name: string): boolean {
   return SECRET_NAME_RE.test(name);
-}
-
-/** 智能判定 kind：显式指定优先，否则按名称后缀（_API_KEY/_TOKEN/... → secret） */
-export function resolveSecretKind(name: string, explicit?: string): SecretStoreKind {
-  if (explicit === 'env' || explicit === 'secret') return explicit;
-  return SECRET_SUFFIX_RE.test(name) ? 'secret' : 'env';
 }
 
 /** 展示用掩码：>12 字符显示前 4 + … + 后 4，否则 *** */
@@ -88,28 +89,35 @@ let cachedCli: CliCommand | undefined;
 
 /**
  * 解析 openclaw CLI 命令形态。
- * 优先 require.resolve('openclaw')（exports 不含 ./package.json，主入口
- * 可解析）→ 向上定位包根 → bin 字段 → `[node, cli.mjs]`（跨平台、不依赖
- * PATH）；兜底 PATH 上的 `openclaw`。
+ *
+ * 优先级：
+ * 1. 正在运行的网关自身的 openclaw 安装（process.argv[1] 向上定位包根）。
+ *    CLI 直写本地 state 库，而库 schema 归网关版本所有，CLI 必须与网关同源；
+ *    dev 场景插件仓库 node_modules 里常 pin 着旧版副本，旧 CLI 会拒写新
+ *    schema 库（2026-08-30：dev 副本 2026.8.1-beta.3/schema 9 拒写全局
+ *    2026.9.1-beta.1/schema 12 的库，exit 1）。
+ * 2. require.resolve('openclaw')（生产安装经 preload symlink 指向全局安装）。
+ * 两种解析均得 `[node, cli.mjs]`（跨平台、不依赖 PATH）；兜底 PATH 上的
+ * `openclaw`。
  */
 export function resolveOpenClawCli(): CliCommand {
   if (cachedCli) return cachedCli;
+  const gatewayEntry = process.argv[1];
+  if (gatewayEntry) {
+    const cli = cliFromPackageRoot(
+      findOpenClawPackageRoot(path.dirname(path.resolve(gatewayEntry))),
+    );
+    if (cli) {
+      cachedCli = cli;
+      return cachedCli;
+    }
+  }
   try {
     const entryPath = require_.resolve('openclaw');
-    const pkgRoot = findPackageRoot(path.dirname(entryPath));
-    if (pkgRoot) {
-      const pkg = JSON.parse(fs.readFileSync(path.join(pkgRoot, 'package.json'), 'utf8')) as {
-        bin?: Record<string, string> | string;
-      };
-      const binField = pkg.bin;
-      const binEntry =
-        typeof binField === 'string'
-          ? binField
-          : binField?.openclaw ?? Object.values(binField ?? {})[0];
-      if (binEntry) {
-        cachedCli = { cmd: process.execPath, args: [path.resolve(pkgRoot, binEntry)] };
-        return cachedCli;
-      }
+    const cli = cliFromPackageRoot(findOpenClawPackageRoot(path.dirname(entryPath)));
+    if (cli) {
+      cachedCli = cli;
+      return cachedCli;
     }
   } catch {
     // openclaw 不可解析（理论上不会——preload 保证 peer 可用）→ 走 PATH
@@ -118,14 +126,43 @@ export function resolveOpenClawCli(): CliCommand {
   return cachedCli;
 }
 
-/** 从起始目录向上查找含 package.json 的包根（最多 6 层） */
-function findPackageRoot(startDir: string): string | undefined {
+/** 从起始目录向上查找 name 为 openclaw 的包根（最多 6 层，跳过无关包） */
+function findOpenClawPackageRoot(startDir: string): string | undefined {
   let dir = startDir;
   for (let i = 0; i < 6; i += 1) {
-    if (fs.existsSync(path.join(dir, 'package.json'))) return dir;
+    const pkgPath = path.join(dir, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as { name?: string };
+        if (pkg.name === 'openclaw') return dir;
+      } catch {
+        // 损坏的 package.json → 继续向上
+      }
+    }
     const parent = path.dirname(dir);
     if (parent === dir) return undefined;
     dir = parent;
+  }
+  return undefined;
+}
+
+/** 读取包根 bin 字段，构造 [node, <bin>] 形态的 CLI 命令；不可用返回 undefined */
+function cliFromPackageRoot(pkgRoot: string | undefined): CliCommand | undefined {
+  if (!pkgRoot) return undefined;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(pkgRoot, 'package.json'), 'utf8')) as {
+      bin?: Record<string, string> | string;
+    };
+    const binField = pkg.bin;
+    const binEntry =
+      typeof binField === 'string'
+        ? binField
+        : binField?.openclaw ?? Object.values(binField ?? {})[0];
+    if (binEntry) {
+      return { cmd: process.execPath, args: [path.resolve(pkgRoot, binEntry)] };
+    }
+  } catch {
+    // 不可读 → 落下一优先级
   }
   return undefined;
 }

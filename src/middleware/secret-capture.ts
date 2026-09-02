@@ -141,9 +141,10 @@ export function secretCapture(params: SecretCaptureParams): Middleware {
       reloadOk = await runReload();
     }
     const masked = maskSecret(text);
+    const kindLabel = entry.kind === 'env' ? '代理可读环境变量' : `kind: ${entry.kind}`;
     const reply = result.ok
       ? [
-          `✅ 已保存 \`${entry.name}\`（kind: ${entry.kind}，值已隐藏：\`${masked}\`）`,
+          `✅ 已保存 \`${entry.name}\`（${kindLabel}，值已隐藏：\`${masked}\`）`,
           reloadOk
             ? '已触发 `secrets reload`。'
             : '提示：若该名称被 SecretRef 引用，可执行 `openclaw secrets reload` 使其立即生效。',

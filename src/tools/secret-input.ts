@@ -4,16 +4,17 @@
  * 用户想交给 AI 一个新密钥/凭据时，host AI 调用本工具（而非让用户把
  * 密钥粘贴进对话）。工具给当前 c2c 用户发一张输入卡片并登记 pending，
  * 用户下一条消息由 secretCapture 中间件拦截，插件就地执行
- * `openclaw secrets store set <NAME> --kind <env|secret> ...` 并直接回执。
+ * `openclaw secrets store set <NAME> --kind env --value ...` 并直接回执。
+ *
+ * kind 恒为 env（代理可读环境变量）：聊天卡片收来的值本就落在 QQ 聊天
+ * 记录里，且 AI 随后要读取使用；secret kind 是「受保护的机密」
+ * （write-only，代理不可读），存进去 AI 反而用不了（2026-08-30 用户反馈）。
  *
  * 非阻塞：工具发卡后立即返回，AI 应结束本轮；执行与回执完全由插件自治。
  */
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk';
 import { tryGetBotForAccount } from '../bot-instance.js';
-import {
-  isValidSecretName,
-  resolveSecretKind,
-} from '../features/secret-store-cli.js';
+import { isValidSecretName } from '../features/secret-store-cli.js';
 import {
   DEFAULT_SECRET_INPUT_TTL_MS,
   cancelPendingSecretInput,
@@ -33,20 +34,11 @@ const SecretInputSchema = {
       description:
         '环境变量名。命名规则：以大写字母开头，仅含大写字母/数字/下划线，' +
         '最长 128 字符。推荐语义化命名，如 GITHUB_TOKEN、OPENWEATHER_API_KEY、' +
-        'DEEPSEEK_API_KEY。注意：以 _API_KEY/_TOKEN/_PASSWORD/_PRIVATE_KEY/_SECRET ' +
-        '结尾的名字会自动按 secret 安全方式写入（stdin，事后不可读回）；' +
-        '其余名字按 env 存储（可用 --value 传入，事后可读回）。',
+        'DEEPSEEK_API_KEY。值将以代理可读环境变量（kind=env）保存，AI 之后可直接读取使用。',
     },
     description: {
       type: 'string',
       description: '该密钥的用途说明（可选），会展示在输入卡片上，帮助用户确认。',
-    },
-    kind: {
-      type: 'string',
-      description:
-        '存储类型（可选）：env=普通环境变量（可读回），secret=密钥（write-only）。' +
-        '缺省时按名称后缀自动判定。通常无需手动指定。',
-      enum: ['env', 'secret'],
     },
   },
   required: ['name'],
@@ -56,7 +48,6 @@ const SecretInputSchema = {
 
 function buildSecretInputCard(
   name: string,
-  kind: 'env' | 'secret',
   description: string | undefined,
   ttlMinutes: number,
 ): string {
@@ -66,9 +57,8 @@ function buildSecretInputCard(
     '',
     `请在下方输入框直接粘贴并发送 **${name}** 的值：`,
     '',
-    `- 写入方式：\`openclaw secrets store set ${name} --kind ${kind}\`${
-      kind === 'secret' ? '（stdin 安全写入，值不可读回）' : ''
-    }`,
+    '- 将保存为**代理可读环境变量**（AI 之后可直接读取使用），' +
+      `写入方式：\`openclaw secrets store set ${name} --kind env\``,
     '- 你发送的消息会被插件直接拦截执行，**不会进入 AI 对话**',
     '- 密钥会留存在你的聊天记录中，请留意所在环境安全',
     `- ${ttlMinutes} 分钟内有效；发送「取消」可退出`,
@@ -122,7 +112,7 @@ export function registerSecretInputTool(api: OpenClawPluginApi): void {
         '必须由用户提供 name 参数（环境变量名）。',
       parameters: SecretInputSchema,
       async execute(_toolCallId, params) {
-        const p = params as { name?: string; description?: string; kind?: string };
+        const p = params as { name?: string; description?: string };
         const name = (p.name ?? '').trim();
         if (!name) return json({ error: 'name 为必填参数（环境变量名）' });
         if (!isValidSecretName(name)) {
@@ -132,10 +122,8 @@ export function registerSecretInputTool(api: OpenClawPluginApi): void {
               `（收到 "${name}"）。示例：OPENWEATHER_API_KEY。请修正后重试。`,
           });
         }
-        if (p.kind !== undefined && p.kind !== 'env' && p.kind !== 'secret') {
-          return json({ error: `kind 仅支持 env 或 secret（收到 "${p.kind}"）` });
-        }
-        const kind = resolveSecretKind(name, p.kind);
+        // 恒为 env：见文件头注释（卡片值 = 代理可读环境，secret 是 write-only 代理不可读）
+        const kind = 'env' as const;
 
         const target = getRequestTarget();
         const accountId = getRequestAccountId() ?? 'default';
@@ -169,7 +157,7 @@ export function registerSecretInputTool(api: OpenClawPluginApi): void {
         try {
           await bot.sendTextWithKeyboard(
             { scope: 'c2c', targetId: parsed.targetId },
-            buildSecretInputCard(name, kind, description, DEFAULT_SECRET_INPUT_TTL_MS / 60_000),
+            buildSecretInputCard(name, description, DEFAULT_SECRET_INPUT_TTL_MS / 60_000),
             buildSecretInputKeyboard() as never,
           );
         } catch (err) {
@@ -183,9 +171,7 @@ export function registerSecretInputTool(api: OpenClawPluginApi): void {
           ok: true,
           name,
           kind,
-          command: `openclaw secrets store set ${name} --kind ${kind}${
-            kind === 'secret' ? ' --value-file -（stdin 安全写入）' : ' --value <用户输入>'
-          }`,
+          command: `openclaw secrets store set ${name} --kind env --value <用户输入>`,
           instruction:
             '卡片已发送给用户。用户下一条私聊消息将被插件自动拦截（不会进入对话），' +
             `执行上述命令保存密钥，成功/失败由插件直接回复用户。` +
