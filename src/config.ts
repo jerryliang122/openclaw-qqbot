@@ -342,6 +342,7 @@ export function resolveQQBotAccount(
     secretSource,
     systemPrompt: accountConfig.systemPrompt,
     markdownSupport: accountConfig.markdownSupport !== false,
+    commandPanelNative: accountConfig.commands?.native !== false,
     userAgentSuffix: resolveUserAgentSuffix(cfg),
     processingTimeoutMs: resolveProcessingTimeoutMs(accountConfig),
     config: normalizeAccountConfig(accountConfig),

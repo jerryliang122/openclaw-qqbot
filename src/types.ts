@@ -27,6 +27,8 @@ export interface ResolvedQQBotAccount {
   systemPrompt?: string;
   /** 是否支持 markdown 消息（默认 true） */
   markdownSupport: boolean;
+  /** 是否自动同步 openclaw essential 原生指令到 QQ Bot 指令面板（默认 true） */
+  commandPanelNative: boolean;
   /** User-Agent 尾部追加内容 */
   userAgentSuffix: string;
   /**
@@ -51,6 +53,15 @@ export interface GroupCoalesceConfig {
   enabled?: boolean;
   /** 最大缓冲消息数（默认 50） */
   maxBuffer?: number;
+}
+
+/** 指令面板配置 */
+export interface CommandsConfig {
+  /**
+   * 是否把 openclaw essential 原生指令自动注册到 QQ Bot 指令面板（默认 true）。
+   * 面板项点击后指令文本填入输入框，以普通文本进入框架，走文本斜杠指令路由执行。
+   */
+  native?: boolean;
 }
 
 /** 单个群的配置 */
@@ -163,6 +174,10 @@ export interface QQBotAccountConfig {
    * "正在输入"指示器配置（仅 C2C 私聊生效）
    */
   typing?: TypingIndicatorConfig;
+  /**
+   * 指令面板配置（openclaw 原生指令 → QQ Bot 指令面板自动注册）
+   */
+  commands?: CommandsConfig;
   /**
    * 是否启用流式消息（默认 false）
    * 启用后，AI 的回复会以流式形式逐步显示在 QQ 聊天中，
