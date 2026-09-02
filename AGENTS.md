@@ -2,6 +2,8 @@
 
 `@tencent-connect/openclaw-qqbot` — OpenClaw 通道插件，把 QQ Bot 官方 API 接入 OpenClaw framework。当前 v2.1.0。
 
+**构建基线：openclaw `2026.8.1`**（peer 范围 `>=2026.8.1`，devDependency 精确钉版 `2026.8.1`）。所有与 openclaw / `openclaw/plugin-sdk` 的交互以 2026.8.1 为最低兼容版本 —— 不得使用仅存在于更新版本中的 API，除非带能力探测与回退；升级钉版前必须重新评估兼容性（2026-09 核查时 registry `latest` 已是 2026.8.2，2026.9.x 在 beta）。
+
 ## Commands
 
 ```bash
@@ -49,13 +51,13 @@ Plugin exports include `qqbotPlugin`, `getBotForAccount`, `QQBotGateway`, `sendT
 
 - **`tsup` post-build hook** (`tsup.config.ts:54`): rewrites `dist/index.cjs` to alias `new Function` → `new _F` (protobufjs pattern that triggers security scanners). Don't strip this — it's load-bearing.
 - **`preload.cjs` symlink**: `openclaw` is a `peerDependency`. When installed via `openclaw plugins install`, the plugin ends up under `~/.openclaw/extensions/openclaw-qqbot/`, and `openclaw/plugin-sdk` must be resolvable from the plugin's `node_modules`. `preload.cjs` synchronously calls `ensurePluginSdkSymlink()` (see `scripts/link-sdk-core.cjs`) which creates a junction `node_modules/openclaw` → the global openclaw install. If you remove or rename `preload.cjs`, the plugin will fail to load when installed via the framework.
-- **`package.json` `external`**: `openclaw` and `openclaw/plugin-sdk/**` are external — they are NOT bundled. `dist/index.cjs` does `require('openclaw/plugin-sdk/core')` at runtime. Local dev needs `node_modules/openclaw` as a real install (or symlink to it). Dev copy is pinned via devDependency `openclaw@^2026.8.1-beta.3` — the peer range `>=2026.8.1` has **no stable release yet** (registry `latest` is 2026.7.x), so plain `npm install` fails with ETARGET; use `npm install --legacy-peer-deps` until openclaw 2026.8.1 stable ships. Note `package-lock.json` is listed in `.gitignore` but is actually tracked — installs will produce a lockfile diff.
+- **`package.json` `external`**: `openclaw` and `openclaw/plugin-sdk/**` are external — they are NOT bundled. `dist/index.cjs` does `require('openclaw/plugin-sdk/core')` at runtime. Local dev needs `node_modules/openclaw` as a real install (or symlink to it). Dev copy is exact-pinned to the baseline via devDependency `openclaw@2026.8.1` so typecheck validates against the oldest supported API surface — keep every `openclaw/plugin-sdk` usage compatible with 2026.8.1 (capability probe + fallback if a newer API is genuinely needed) and don't bump the pin without re-checking compatibility. Stable 2026.8.1 now satisfies the peer range, so plain `npm install` works; `--legacy-peer-deps` is no longer required. Note `package-lock.json` is listed in `.gitignore` but is actually tracked — installs will produce a lockfile diff.
 - **`src/openclaw-plugin-sdk.d.ts`**: local type stubs for `openclaw/plugin-sdk` subpaths the package doesn't type. Since 2026.8.1-beta the openclaw package deliberately excludes some subpath `.d.ts` (e.g. `text-utility-runtime`) — extend this stub when typecheck reports missing declarations for an `openclaw/plugin-sdk/*` import.
 - **Runtime contract probe** (`src/adapter/contract.ts`): `REQUIRED` list is currently **empty**; all capabilities are `OPTIONAL`. The probe still runs on register but only logs degraded features; it will never throw unless someone adds a required entry. Don't rely on it to fail fast on missing APIs.
 - **Multi-account**: top-level `channels.qqbot.appId/secret` is the `"default"` account; additional accounts go under `channels.qqbot.accounts.<id>`. Each account gets its own gateway and token cache. OpenIDs are **per-account** — a user OpenID from bot A cannot be used by bot B.
 - **Group message priority chain**: `groups.{groupOpenid}.requireMention` → `groups.*.requireMention` → account-level `defaultRequireMention` → `true` (default). Same precedence applies to other group config fields.
 - **No secrets in repo code**: appid/secret is configured via `openclaw channels add --token "appid:secret"` or env vars `QQBOT_APPID` / `QQBOT_SECRET`. Never hardcode or log credentials.
-- **`package-lock.json`**: listed in `.gitignore` but actually tracked in git — regenerate with `npm install --legacy-peer-deps` (see the `external` gotcha above) and expect a lockfile diff; don't `npm ci` against a fresh clone.
+- **`package-lock.json`**: listed in `.gitignore` but actually tracked in git — regenerate with `npm install` (see the `external` gotcha above) and expect a lockfile diff; don't `npm ci` against a fresh clone.
 - **Quota management**: QQ Bot enforces passive reply limits (C2C: 4 replies/msg_id within 60min; Group: 5 replies/msg_id within 5min). The plugin automatically falls back to proactive messaging when quota is exhausted. Use `ReplyLimiter` (src/outbound/reply-limiter.ts) for custom quota handling. See `checkPassiveReplyQuota()` and `consumePassiveReplyQuota()` in src/features/quota-manager.ts.
 - **Typing renewal**: C2C typing indicator (`sendTyping`) automatically renews every 20s minimum (QPS constraint). When quota is exhausted, typing falls back to proactive mode (without msg_id). Typing also auto-renews after outbound messages (5s delay) to maintain the indicator during streaming/chain-of-thought. See `c2cTypingIndicator` middleware and `POST_MESSAGE_REFRESH_DELAY_MS` constant.
 - **ask_user buttons**: single-question prompts render one inline keyboard (`qqbot:q:` button_data) resolved via `questionGatewayRuntime.resolveOption`. Multi-question prompts (2-3 questions) arrive **text-only** (the framework's v1 contract: no structured options in `channelData.askUser`); the plugin parses the prompt text (`parseMultiQuestionPrompt`), sends one card per question (`qqbot:qm:<recordId>:<qIdx>:<oIdx>`), and buffers taps in an in-memory store. When all questions are answered the plugin sends a **confirm card**: an instruction button (`action.type=2`, `enter: true`) whose data is the full keyed answer text (`"1: 3\n2: 1"`), which the QQ client emits as a **real user message** — the framework's native keyed-text claim then resolves the pending ask_user. A second `enter: false` button pre-fills the input for manual editing. **Never** submit multi-question answers programmatically: official openclaw has no multi-question submit API for channels (maintaining a fork costs more than it buys), and synthesizing an inbound user message fails because the framework steers it into the ask_user-suspended run without claiming the question (2026-08-24 incident). Inbound text is **never intercepted** for multi-question answering — real messages must reach the framework untouched. Parse failures (secret/malformed) fall back to plain text. Display: button labels are truncated (`buildButtonLabel`, ~12 CJK chars) with full options in the card body; rows auto-split when labels are wide. `isOther` questions (detected via the "Other: reply..." line) get a `✍️ 其他` **instruction button** (`action.type=2`, pre-fills `"N: "` in the client input box) so free-text answers are one tap + typing away.
@@ -94,7 +96,9 @@ QQ Bot 跟 Telegram / Discord / Slack 等其他通道在平台 API 形态上差�
 
 ### 底层依赖
 
-- 完全依赖官方 Node.js SDK `@tencent-connect/qqbot-nodejs` (v1.0.4)。
+- 完全依赖官方 Node.js SDK `@tencent-connect/qqbot-nodejs` (v1.0.4)。`@tencent-connect/qqbot-connector` (1.2.0, 精确钉版) 仅用于扫码登录 setup 流程。
+- **SDK 版本滞后于平台文档**（2026-09 核查）: npm 上 SDK latest 仍是 1.0.4 (2026-07-14 发布)，未覆盖平台 2026-08-10 / 08-12 更新 —— 接口域名统一为 `api.bot.qq.com`、群禁言管理（查询/设置用户禁言）、入群申请审批（拉列表/审批）与自动审批策略、自定义菜单、指令面板、Markdown 新参数 `force_verify_image_resource`、入群申请事件。其中 REST 新接口**今天就可经 `qqbot_platform_api` 工具调用**（SDK `bot.api` 是任意 path 的通用网关，自动鉴权/重试），类型化封装等 SDK 发版；入群申请**事件**与 `force_verify_image_resource` 参数则依赖 SDK 更新。
+- **API 域名现状**: 官方 2026-08-10 起统一为 `api.bot.qq.com`；旧域名 `api.sgroup.qq.com` 仍在服务、无下线公告，两域名已验证路由一致（同 path 返回相同业务错误码）。网关默认 baseUrl 仍指向旧域名（`src/gateway/qqbot-gateway.ts` 构造 `new QQBot({...})` 处），`QQBOT_BASE_URL` / `QQBOT_TOKEN_BASE_URL` 环境变量可随时覆盖 —— 将来切换新域名只需改默认值，不需要等 SDK 发版（SSRF 白名单只拦插件自身的媒体/图片 fetch，不拦 SDK 的 API 调用）。
 - SDK 自身是 `https://bot.q.qq.com/wiki/develop/api-v2/` 上公开的 HTTP REST + WebSocket Gateway 协议的薄封装 — 本插件不直接 hit `https://bots.qq.com` / `https://api.sgroup.qq.com` 任何 endpoint,所有进出都走 SDK。
 - `bot-instance.ts` 用 `new QQBot({...})` 构造;所有 `sendText`/`sendMedia`/`sendTyping`/`openStream` 调用最终落到 SDK 的 `QQBot.ts` 内部方法。
 - **不要在本仓库中绕过 SDK 直接 fetch QQ API** — 一旦绕过就脱离了 SDK 的 token 缓存、重连、事件路由、消息缓存等机制。
@@ -182,6 +186,7 @@ QQ 跟 Telegram 的最大差异在**回复机制**:
 ### 文档 / 进一步阅读
 
 - QQ Bot 官方: `https://bot.q.qq.com/wiki/develop/api-v2/`
+- API 更新日志: `https://bot.q.qq.com/wiki/develop/api-v2/changelog.html`（注意：`/wiki/changelog/` 根路径是 2022 年的旧页面，别用）
 - SDK 源码: `node_modules/@tencent-connect/qqbot-nodejs/src/QQBot.ts`(所有 methods 都在这)
 - SDK README: `node_modules/@tencent-connect/qqbot-nodejs/README.md`
 - 平台差异分析历史:见 `docs/` 下相关笔记。
