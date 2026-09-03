@@ -9,7 +9,9 @@
  *
  * 平台约束（官方文档）：
  *  - 面板项 name ≤14 字符、desc ≤30 字符、每面板 ≤20 项、每 bot ≤20 个面板
- *  - POST /v2/panels 限 10 QPM — 每次全量同步 ≤4 个请求，余量充足
+ *  - POST /v2/panels 限 10 QPM — 常规同步 2 GET（c2c+group 各一页）+ 2 POST，余量充足
+ *  - GET /v2/panels 限 30 QPM，**scope 为必填查询参数**（缺失报 40030011 生效场景不合法），
+ *    列表分页（next_cursor / is_end）
  *
  * 幂等识别：自家面板用 panel.remark = "openclaw-qqbot:auto:<scope>" 打标；
  * remark 不匹配的面板（用户在开放平台手动创建的）绝不修改或删除。
@@ -37,6 +39,9 @@ const PANEL_ITEM_NAME_MAX = 14;
 const PANEL_ITEM_DESC_MAX = 30;
 /** 平台限制：每面板最大项数 */
 const PANEL_ITEM_LIMIT = 20;
+/** 列表分页：每页条数（官方上限 50）；循环上限防意外无限翻页 */
+const PANEL_LIST_PAGE_SIZE = 50;
+const PANEL_LIST_MAX_PAGES = 5;
 /** openclaw 命令注册表的 provider 标识 */
 const QQBOT_PROVIDER = 'qqbot';
 
@@ -118,11 +123,11 @@ export async function syncAccountCommandPanels(
   items: readonly CommandPanelItem[],
   log?: PluginLogger,
 ): Promise<CommandPanelSyncResult[]> {
-  const existing = await listPanels(api, log);
+  const byScope = await listPanels(api, log);
   const results: CommandPanelSyncResult[] = [];
   for (const scope of PANEL_SCOPES) {
     const remark = panelRemark(scope);
-    const mine = existing.filter((p) => panelRemarkOf(p) === remark);
+    const mine = byScope[scope].filter((p) => panelRemarkOf(p) === remark);
     if (mine.length === 0) {
       await api.post('/v2/panels', {
         scope,
@@ -148,20 +153,54 @@ export async function syncAccountCommandPanels(
   return results;
 }
 
-async function listPanels(api: CommandPanelApi, log?: PluginLogger): Promise<PanelRecord[]> {
-  const raw: unknown = await api.get('/v2/panels');
-  const panels = extractPanelRecords(raw);
-  if (panels.length === 0 && raw != null && typeof raw === 'object' && !Array.isArray(raw)) {
-    // 官方文档未给出列表响应的精确结构；未识别形状时记录原始 payload 便于排查
-    log?.debug(`[command-panel] GET /v2/panels 响应形状未识别: ${JSON.stringify(raw).slice(0, 500)}`);
+/** 列表按 scope 分桶：GET 必传 scope，每个 scope 的同步只看自己场景的面板 */
+type PanelsByScope = Record<(typeof PANEL_SCOPES)[number], PanelRecord[]>;
+
+async function listPanels(api: CommandPanelApi, log?: PluginLogger): Promise<PanelsByScope> {
+  // 官方文档（bot.q.qq.com GET /v2/panels）：scope 为必填查询参数，缺失时服务端报
+  // 40030011「生效场景不合法」；列表按 next_cursor / is_end 分页。故按 scope 各查一遍。
+  const byScope: PanelsByScope = { c2c: [], group: [] };
+  for (const scope of PANEL_SCOPES) {
+    let cursor = '';
+    for (let page = 0; page < PANEL_LIST_MAX_PAGES; page++) {
+      const query: Record<string, string | number | boolean> = { scope, limit: PANEL_LIST_PAGE_SIZE };
+      if (cursor) query.cursor = cursor;
+      const raw: unknown = await api.get('/v2/panels', query);
+      const records = extractPanelRecords(raw);
+      byScope[scope].push(...records);
+      if (records.length === 0 && page === 0) {
+        log?.debug(
+          `[command-panel] GET /v2/panels?scope=${scope} 拉到 0 条记录，响应形状: ${JSON.stringify(raw).slice(0, 500)}`,
+        );
+      }
+      cursor = extractNextCursor(raw);
+      if (!cursor || extractIsEnd(raw)) break;
+    }
   }
-  return panels;
+  return byScope;
+}
+
+/** 官方列表响应形如 { records, next_cursor, is_end }；旧/未知形状无分页字段时返回空串 */
+function extractNextCursor(raw: unknown): string {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const v = (raw as Record<string, unknown>).next_cursor;
+    if (typeof v === 'string') return v;
+  }
+  return '';
+}
+
+function extractIsEnd(raw: unknown): boolean {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const v = (raw as Record<string, unknown>).is_end;
+    if (typeof v === 'boolean') return v;
+  }
+  return false;
 }
 
 function extractPanelRecords(raw: unknown): PanelRecord[] {
   if (Array.isArray(raw)) return raw.filter(isPanelRecord);
   if (raw && typeof raw === 'object') {
-    for (const key of ['panels', 'data', 'list', 'items'] as const) {
+    for (const key of ['records', 'panels', 'data', 'list', 'items'] as const) {
       const value = (raw as Record<string, unknown>)[key];
       if (Array.isArray(value)) return value.filter(isPanelRecord);
     }

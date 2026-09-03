@@ -32,13 +32,14 @@ interface RecordedCall {
   method: 'get' | 'post' | 'put' | 'delete';
   path: string;
   body?: unknown;
+  query?: Record<string, string | number | boolean>;
 }
 
 function makeFakeApi(existingPanels: unknown, opts?: { failGet?: Error }) {
   const calls: RecordedCall[] = [];
   const api: CommandPanelApi = {
-    get: async () => {
-      calls.push({ method: 'get', path: '/v2/panels' });
+    get: async (path: string, query?: Record<string, string | number | boolean>) => {
+      calls.push({ method: 'get', path, query });
       if (opts?.failGet) throw opts.failGet;
       return existingPanels;
     },
@@ -119,6 +120,55 @@ await test('selectEssentialCommands: 封顶 20 项', () => {
 });
 
 // ── syncAccountCommandPanels 同步核心 ──
+
+await test('sync: GET 必带 scope 查询参数（缺參会被服务端 40030011 拒绝）', async () => {
+  const { api, calls } = makeFakeApi({ records: [], next_cursor: '', is_end: true });
+  await syncAccountCommandPanels(api, ITEMS);
+  const gets = calls.filter((c) => c.method === 'get');
+  assert.equal(gets.length, 2);
+  assert.deepEqual(
+    gets.map((g) => g.query?.scope).sort(),
+    ['c2c', 'group'],
+  );
+  for (const g of gets) assert.equal(g.path, '/v2/panels');
+});
+
+await test('sync: 官方 records 响应形状 + next_cursor 翻页直到 is_end', async () => {
+  const calls: RecordedCall[] = [];
+  const firstPage = {
+    records: [{ panel_id: 'p1', panel: { remark: 'openclaw-qqbot:auto:c2c' } }],
+    next_cursor: 'cursor-2',
+    is_end: false,
+  };
+  const lastPage = { records: [], next_cursor: '', is_end: true };
+  const api: CommandPanelApi = {
+    get: async (path: string, query?: Record<string, string | number | boolean>) => {
+      calls.push({ method: 'get', path, query });
+      if (query?.scope === 'group') return lastPage; // group 无面板，首页即末页
+      return query?.cursor ? lastPage : firstPage;
+    },
+    post: async (path: string, body?: unknown) => {
+      calls.push({ method: 'post', path, body });
+      return { panel_id: 'p_new' };
+    },
+    put: async (path: string, body?: unknown) => {
+      calls.push({ method: 'put', path, body });
+      return {};
+    },
+    delete: async (path: string) => {
+      calls.push({ method: 'delete', path });
+      return {};
+    },
+  };
+  const results = await syncAccountCommandPanels(api, ITEMS);
+  // c2c：首页命中自家面板（翻页后无新增）→ PUT；group：无面板 → POST
+  assert.ok(results.some((r) => r.scope === 'c2c' && r.action === 'updated'));
+  assert.ok(results.some((r) => r.scope === 'group' && r.action === 'created'));
+  // c2c 翻了一页（带 cursor），group 首页即 is_end 不翻页
+  const cursored = calls.filter((c) => c.method === 'get' && c.query?.cursor);
+  assert.equal(cursored.length, 1);
+  assert.equal(cursored[0]?.query?.scope, 'c2c');
+});
 
 await test('sync: 无自家面板 → 每个 scope POST 创建', async () => {
   const { api, calls } = makeFakeApi({ panels: [] });
