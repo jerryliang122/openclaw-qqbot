@@ -139,7 +139,7 @@ This capability depends on OpenClaw cron scheduling and proactive messaging. If 
 >
 > **QQBot**: (final answer)
 
-QQ has no message-edit API, so the live-updating OpenClaw progress card is delivered as **throttled milestone messages**: the first card creation is pushed immediately, subsequent pushes only fire on step-status changes, at most every 20s and 3 per turn. Pushes ride the passive-reply quota of the triggering message and **never** fall back to proactive sending; when the remaining passive quota drops below 2 the push is skipped so the final reply always keeps a passive slot. Enabled by default in C2C; groups are opt-in (`groups.<gid>.progressCard: true`).
+QQ has no message-edit API, so the live-updating OpenClaw progress card is delivered as **milestone messages**: the first card creation is pushed immediately, and every subsequent step-status change is pushed right away (no throttling by default — the practical ceiling is the passive quota; configure `minIntervalMs`/`maxPerTurn` to throttle). Pushes ride the passive-reply quota of the triggering message and **never** fall back to proactive sending; when the remaining passive quota drops below 2 the push is skipped so the final reply always keeps a passive slot. Enabled by default in C2C; groups are opt-in (`groups.<gid>.progressCard: true`).
 
 ### 📎 File Sending
 
@@ -909,7 +909,7 @@ After receiving a private message, the bot shows "typing…" and renews it perio
     "qqbot": {
       "typing": {
         "enabled": true,
-        "intervalMs": 20000
+        "intervalMs": 55000
       }
     }
   }
@@ -917,7 +917,7 @@ After receiving a private message, the bot shows "typing…" and renews it perio
 ```
 
 - `enabled` — enable/disable the indicator (default: `true`)
-- `intervalMs` — renewal interval in milliseconds (default: `20000`). The QQ client clears the indicator when the user leaves and re-enters the chat; only a fresh push re-shows it, hence the periodic renewal. Values below `20000` are clamped to `20000` (QPS constraint)
+- `intervalMs` — renewal interval in milliseconds (default: `55000` — the server window is ~60s, so a 55s renewal keeps the indicator nearly continuous while consuming far fewer passive-quota slots than frequent renewals). The QQ client clears the indicator when the user leaves and re-enters the chat; only a fresh push re-shows it, hence the periodic renewal. Values below `20000` are clamped to `20000` (QPS constraint)
 - **Quota note**: typing notifications share the passive-reply quota of the user message they reply to (QQ Open Platform allows ~5 passive replies per message). Once the passive quota is exhausted, typing — just like reply messages — automatically falls back to proactive sending (no msg_id); renewal is never interrupted
 - **Intermediate-message refresh**: when the bot sends a message (e.g. chain-of-thought intermediate output), the QQ client terminates the indicator; if the framework task is still running, the plugin renews the indicator 5 seconds after the message (still guarded by the 20s QPS spacing). After the final reply completes the task, no further refresh is sent
 
@@ -942,8 +942,8 @@ Pushes OpenClaw `progress_card` tool updates (the agent's step checklist for sub
 
 - `enabled` — enable/disable (default: `true`)
 - `group` — allow progress pushes in groups (default: `false`; group passive window is only 5 minutes so long tasks usually miss it, and bot chatter is more intrusive in groups). Per-group override: `groups.<gid>.progressCard: true/false` > `groups."*".progressCard` > this field
-- `minIntervalMs` — minimum interval between pushes (default: `20000`); the first card creation is pushed immediately
-- `maxPerTurn` — maximum pushes per turn (default: `3`)
+- `minIntervalMs` — minimum interval between pushes (default: `0` = no throttling, push on every content change); the first card creation is always pushed immediately
+- `maxPerTurn` — maximum pushes per turn (default: unlimited; the practical ceiling is the quota red line — on a fresh c2c message at most 3 pushes fit while keeping 1 slot for the final reply)
 - **Quota red line**: pushes only ride the passive-reply quota of the triggering message; they never degrade to proactive sends, and they are skipped when fewer than 2 passive slots remain (final reply is protected). Room-event groups are never pushed (structural silence)
 - **Content limitation**: the framework bridge delivers the plan **steps only** — the card's markdown note is not pushed to QQ
 

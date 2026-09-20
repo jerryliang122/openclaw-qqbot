@@ -42,10 +42,13 @@ export interface ProgressPlanUpdatePayload {
 
 // ── 常量 ──
 
-/** 两次推送最小间隔 ms（首次建卡不受限） */
-export const DEFAULT_PROGRESS_MIN_INTERVAL_MS = 20_000;
-/** 每轮最多推送条数 */
-export const DEFAULT_PROGRESS_MAX_PER_TURN = 3;
+/** 两次推送最小间隔 ms（默认 0 = 不节流，每次内容变化即推；首次建卡本就不受限） */
+export const DEFAULT_PROGRESS_MIN_INTERVAL_MS = 0;
+/**
+ * 每轮最多推送条数（默认 Infinity = 不设上限）。实际天花板由被动配额红线
+ * 决定：推送前剩余额度 ≥2 才消费，即私聊最多把 4 条额度耗到剩 1。
+ */
+export const DEFAULT_PROGRESS_MAX_PER_TURN = Number.POSITIVE_INFINITY;
 /** 单条步骤文本最大显示宽度（全角=2，约 20 个汉字） */
 const MAX_STEP_DISPLAY_WIDTH = 40;
 /** explanation 单行最大显示宽度（约 30 个汉字） */
@@ -155,7 +158,9 @@ export interface ProgressCardPusher {
 
 export function createProgressCardPusher(deps: ProgressCardPusherDeps): ProgressCardPusher {
   const minIntervalMs = Math.max(0, deps.minIntervalMs ?? DEFAULT_PROGRESS_MIN_INTERVAL_MS);
-  const maxPerTurn = Math.max(1, deps.maxPerTurn ?? DEFAULT_PROGRESS_MAX_PER_TURN);
+  const requestedMax = deps.maxPerTurn ?? DEFAULT_PROGRESS_MAX_PER_TURN;
+  const maxPerTurn = requestedMax > 0 ? requestedMax : Number.POSITIVE_INFINITY;
+  const capLabel = maxPerTurn === Number.POSITIVE_INFINITY ? '∞' : String(maxPerTurn);
   const now = deps.now ?? (() => Date.now());
   const info = (msg: string) => deps.log?.info(`[progress-card] ${msg}`);
 
@@ -183,7 +188,7 @@ export function createProgressCardPusher(deps: ProgressCardPusherDeps): Progress
       const isInitialPush = lastPushAt === 0;
       if (!isInitialPush) {
         if (pushedCount >= maxPerTurn) {
-          info(`skip: per-turn cap reached (${pushedCount}/${maxPerTurn})`);
+          info(`skip: per-turn cap reached (${pushedCount}/${capLabel})`);
           return;
         }
         const sinceLast = now() - lastPushAt;
@@ -233,7 +238,7 @@ export function createProgressCardPusher(deps: ProgressCardPusherDeps): Progress
       pushedCount++;
       lastPushAt = now();
       lastPushedText = text;
-      info(`pushed ${pushedCount}/${maxPerTurn} to ${deps.to}`);
+      info(`pushed ${pushedCount}/${capLabel} to ${deps.to}`);
     },
   };
 }

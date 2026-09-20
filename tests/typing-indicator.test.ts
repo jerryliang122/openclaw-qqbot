@@ -81,8 +81,8 @@ function makeCtx(kind: 'c2c' | 'group', msgId: string, calls: string[]): CtxMock
 
 group('续期间隔钳制（QPS 约束）');
 
-await test('默认间隔为 20s', () => {
-  assert.strictEqual(resolveTypingIntervalMs(undefined), 20_000);
+await test('默认间隔为 55s（省被动配额）', () => {
+  assert.strictEqual(resolveTypingIntervalMs(undefined), 55_000);
 });
 
 await test('低于 20s 的配置被钳制到 20s', () => {
@@ -268,7 +268,9 @@ await test('中间消息发出后 5s 补发续期，受 QPS 间距保护顺延',
   globalThis.clearTimeout = (() => {}) as unknown as typeof globalThis.clearTimeout;
 
   try {
-    const mw = c2cTypingIndicator({ accountId: 'acct-p1' });
+    // 显式 20s：本测试验证"间距不足顺延"机制本身（断言上限 20s）；
+    // 默认值（55s）另由 resolveTypingIntervalMs 断言覆盖
+    const mw = c2cTypingIndicator({ accountId: 'acct-p1', intervalMs: 20_000 });
     // next 挂起，模拟框架任务仍在进行
     let releaseNext!: () => void;
     const nextDone = new Promise<void>((r) => { releaseNext = r; });

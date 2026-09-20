@@ -2,7 +2,7 @@
  * C2C "正在输入"指示器中间件（替代 SDK 的 typingIndicator）。
  *
  * 与 SDK 版的三点差异：
- * 1. 续期间隔默认 20s 且强制不低于 20s（QPS 约束，事件触发的续期
+ * 1. 续期间隔默认 55s 且强制不低于 20s（QPS 约束，事件触发的续期
  *    同样受此间距保护）
  * 2. 配额感知：typing 通知携带入站 msg_id 时属于被动回复、消耗该
  *    msg_id 的被动配额，与真正的回复消息共享额度（经同一 limiter
@@ -22,7 +22,12 @@ import { subscribeOutboundMessage } from '../features/typing-refresh.js';
 
 /** QPS 约束：续期间隔不得低于 20s */
 export const MIN_TYPING_INTERVAL_MS = 20_000;
-const DEFAULT_TYPING_INTERVAL_MS = 20_000;
+/**
+ * 默认续期间隔 55s：服务端窗口约 60s，55s 续期基本保持指示器连续，
+ * 同时大幅减少被动配额占用（20s 续期在私聊 4 条/msg_id 额度下 ~1 分钟
+ * 就烧完转主动；55s 可覆盖 ~3.5 分钟）。
+ */
+const DEFAULT_TYPING_INTERVAL_MS = 55_000;
 /** 服务端输入状态窗口（秒），QQ 平台窗口上限约 60s */
 const TYPING_DURATION_SEC = 60;
 /** 出站消息后延迟多久补发续期 */

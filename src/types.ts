@@ -89,9 +89,15 @@ export interface ProgressCardConfig {
    * 可被 groups.<gid>.progressCard / groups."*".progressCard 覆盖。
    */
   group?: boolean;
-  /** 两次推送最小间隔 ms（默认 20000；首次建卡不受限） */
+  /**
+   * 两次推送最小间隔 ms（默认 0 = 不节流，内容变化即推；首次建卡本就不受限）。
+   * 平台无消息编辑 API，不节流意味着多次更新=多条消息，按需调大。
+   */
   minIntervalMs?: number;
-  /** 每轮最多推送条数（默认 3） */
+  /**
+   * 每轮最多推送条数（默认不限）。实际天花板由配额红线决定：
+   * 推送前剩余被动额度 ≥2 才消费（私聊 4 条额度最多耗到剩 1）。
+   */
   maxPerTurn?: number;
 }
 

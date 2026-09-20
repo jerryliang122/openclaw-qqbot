@@ -38,7 +38,6 @@ async function test(name: string, fn: () => Promise<void> | void) {
 const {
   renderProgressCardText,
   createProgressCardPusher,
-  DEFAULT_PROGRESS_MIN_INTERVAL_MS,
 } = await import('../src/features/progress-card.ts');
 const {
   clearQuotaCache,
@@ -219,16 +218,31 @@ await test('渲染无变化 → 静默跳过', async () => {
   assert.equal(h.sent.length, 1, '内容无变化不应重复推送');
 });
 
-await test('间隔节流：<minIntervalMs 的更新被跳过，超过后放行', async () => {
+await test('显式 minIntervalMs：间隔内跳过，超过后放行', async () => {
   clearQuotaCache();
-  const h = makePusher({ accountId: 'p3' });
+  const h = makePusher({ accountId: 'p3', minIntervalMs: 20_000 });
   await h.push({ steps: steps(['a', 'pending']) });
   h.advance(5_000);
   await h.push({ steps: steps(['a', 'completed'], ['b', 'in_progress']) });
-  assert.equal(h.sent.length, 1, `间隔 ${DEFAULT_PROGRESS_MIN_INTERVAL_MS}ms 内不推`);
-  h.advance(DEFAULT_PROGRESS_MIN_INTERVAL_MS + 1);
+  assert.equal(h.sent.length, 1, '间隔 20000ms 内不推（内容变化也等待）');
+  h.advance(15_001); // 累计 20001ms > minIntervalMs
   await h.push({ steps: steps(['a', 'completed'], ['b', 'in_progress']) });
   assert.equal(h.sent.length, 2, '超过间隔后状态变化应推送');
+});
+
+await test('默认无节流：内容变化即推，天花板由配额红线决定', async () => {
+  clearQuotaCache();
+  const h = makePusher({ accountId: 'p3b' }); // 默认 interval 0 / 无每轮上限
+  await h.push({ steps: steps(['a', 'pending']) });
+  h.advance(1); // 几乎无间隔
+  await h.push({ steps: steps(['a', 'completed'], ['b', 'pending']) });
+  h.advance(1);
+  await h.push({ steps: steps(['b', 'completed'], ['c', 'pending']) });
+  assert.equal(h.sent.length, 3, '私聊 4 条额度耗到剩 1 前（≥2 保留线）应连推 3 条');
+  h.advance(1);
+  await h.push({ steps: steps(['c', 'completed']) });
+  assert.equal(h.sent.length, 3, '剩余 1 条 <2 保留线 → 静默跳过，绝不主动');
+  assert.equal(quotaCount('p3b', 'c2c', h.msgId), 3);
 });
 
 await test('每轮上限：达到 maxPerTurn 后不再推送', async () => {
