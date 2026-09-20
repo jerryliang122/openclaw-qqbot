@@ -226,11 +226,17 @@ async function handleApproval(
 
   try {
     const { resolveApprovalOverGateway } = await import('openclaw/plugin-sdk/approval-gateway-runtime');
+    // 身份字段必须成组：openclaw 2026.9+ 的规范解析器对带 senderId 的请求强制
+    // channel/accountId/senderId 三元组，缺一即在发请求前抛错（审批卡死事故
+    // 2026-09-09）。三元组同时作为 reviewer 让框架经 authorizeActorAction 回调
+    // 做 allowFrom 服务端授权。回归测试 tests/approval-resolve.test.ts。
     await resolveApprovalOverGateway({
       cfg,
       approvalId: parsed.approvalId,
       approvalKind: parsed.approvalKind,
       decision: parsed.decision,
+      channel: 'qqbot',
+      accountId: account.accountId,
       senderId: operatorId,
       clientDisplayName: 'QQBot Approval Handler',
     });

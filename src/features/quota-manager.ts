@@ -107,6 +107,24 @@ export function rollbackPassiveReplyQuota(params: {
 }
 
 /**
+ * 只读查询某 msg_id 当前剩余的被动回复额度（不消耗）。
+ * msg_id 过期返回 0（不可再用）；无记账记录返回该 scope 的上限。
+ * 供进度推送等可选发送做"保留余量"预检（如剩余 < 2 时跳过，为最终回复保底）。
+ */
+export function getRemainingPassiveQuota(params: QuotaCheckParams): number {
+  const { accountId, msgId, scope } = params;
+  if (!msgId) return 0;
+  const key = `${accountId}:${scope}:${msgId}`;
+  const now = Date.now();
+  const cached = quotaCache.get(key);
+  if (cached) {
+    if (now > cached.expiresAt) return 0;
+    return Math.max(0, QUOTA_LIMITS[scope].count - cached.count);
+  }
+  return QUOTA_LIMITS[scope].count;
+}
+
+/**
  * 原子操作：检查并消耗被动回复配额
  * 推荐使用此函数，避免 check-then-consume 竞态
  */

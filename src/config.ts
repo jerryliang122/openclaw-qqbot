@@ -100,6 +100,7 @@ const DEFAULT_GROUP_CONFIG: Omit<Required<GroupConfig>, "prompt" | "coalesce" | 
   historyMode: "clear",
   unmentionedInbound: "user_request",
   coalesce: DEFAULT_GROUP_COALESCE_CONFIG,
+  progressCard: false,
 };
 
 /** 默认群消息行为 PE（可通过配置覆盖） */
@@ -165,6 +166,7 @@ export function resolveGroupConfigFromAccount(account: ResolvedQQBotAccount, gro
     historyLimit: specificCfg.historyLimit ?? wildcardCfg.historyLimit ?? DEFAULT_GROUP_CONFIG.historyLimit,
     historyMode: specificCfg.historyMode ?? wildcardCfg.historyMode ?? DEFAULT_GROUP_CONFIG.historyMode,
     unmentionedInbound: specificCfg.unmentionedInbound ?? wildcardCfg.unmentionedInbound ?? DEFAULT_GROUP_CONFIG.unmentionedInbound,
+    progressCard: specificCfg.progressCard ?? wildcardCfg.progressCard ?? account.config?.progressCard?.group ?? DEFAULT_GROUP_CONFIG.progressCard,
     coalesce,
   };
 }

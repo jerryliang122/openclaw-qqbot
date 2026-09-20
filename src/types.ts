@@ -74,6 +74,33 @@ export interface CommandsConfig {
   native?: boolean;
 }
 
+/**
+ * 进度卡片推送配置（openclaw progress_card → QQ 里程碑消息）
+ *
+ * QQ 无消息编辑 API，进度更新只能以新消息推送：
+ * 首次建卡立即推 + 步骤状态变化时按节流推送；只走被动配额、
+ * 绝不降级主动发送；剩余被动额度 < 2 时跳过（为最终回复保底）。
+ */
+export interface ProgressCardConfig {
+  /** 是否启用（默认 true；仅 c2c 生效，群聊另见 group） */
+  enabled?: boolean;
+  /**
+   * 群聊是否推送进度（默认 false——群被动窗口仅 5 分钟且 bot 刷屏扰民）。
+   * 可被 groups.<gid>.progressCard / groups."*".progressCard 覆盖。
+   */
+  group?: boolean;
+  /**
+   * 两次推送最小间隔 ms（默认 0 = 不节流，内容变化即推；首次建卡本就不受限）。
+   * 平台无消息编辑 API，不节流意味着多次更新=多条消息，按需调大。
+   */
+  minIntervalMs?: number;
+  /**
+   * 每轮最多推送条数（默认不限）。实际天花板由配额红线决定：
+   * 推送前剩余被动额度 ≥2 才消费（私聊 4 条额度最多耗到剩 1）。
+   */
+  maxPerTurn?: number;
+}
+
 /** 单个群的配置 */
 export interface GroupConfig {
   /** 是否需要 @机器人才响应（默认 true） */
@@ -108,6 +135,11 @@ export interface GroupConfig {
   unmentionedInbound?: 'user_request' | 'room_event';
   /** 群消息合并配置（覆盖账号级配置） */
   coalesce?: GroupCoalesceConfig;
+  /**
+   * 是否推送进度卡片消息（默认 false，覆盖账号级 progressCard.group）：
+   * 群级显式开关 > groups."*" > 账号级 progressCard.group > false
+   */
+  progressCard?: boolean;
 }
 
 /** 限流单层配置（滑动窗口） */
@@ -221,6 +253,10 @@ export interface QQBotAccountConfig {
    * "正在输入"指示器配置（仅 C2C 私聊生效）
    */
   typing?: TypingIndicatorConfig;
+  /**
+   * 进度卡片推送配置（openclaw progress_card 工具 → QQ 里程碑消息，默认开启）
+   */
+  progressCard?: ProgressCardConfig;
   /**
    * 指令面板配置（openclaw 原生指令 → QQ Bot 指令面板自动注册）
    */

@@ -37,6 +37,10 @@ import {
 import { tryGetBotForAccount } from '../bot-instance.js';
 import { resolveGroupConfigFromAccount, resolveMentionPatterns } from '../config.js';
 import { detectWasMentioned } from '../utils/mention.js';
+import {
+  createProgressCardPusher,
+  type ProgressPlanUpdatePayload,
+} from '../features/progress-card.js';
 
 /** 失败兜底文案（对齐 telegram：Something went wrong while processing your request.） */
 const FAILURE_FALLBACK_TEXT = 'Something went wrong while processing your request. Please try again.';
@@ -249,6 +253,40 @@ export async function dispatchToOpenClaw(
 
   if (streamingController) {
     dlog?.debug(`streaming enabled for ${envelope.senderId}`);
+  }
+
+  // ── 进度卡片推送（progress_card → QQ 里程碑消息）──
+  // 激活条件：账号级 enabled（默认 true）&& (c2c || 群级显式开启) && 非 room_event
+  // （room_event 群结构性沉默，绝不推进度）。onPlanUpdate 是框架 progress_card
+  // 的唯一通道桥（steps-only）；启用时必须同时设 suppressDefaultToolProgressMessages，
+  // 否则用户未开 verbose 工具摘要时框架不转发回调（requiresToolSummaryVisibility 门控）。
+  const progressCardConfig = account.config?.progressCard;
+  const progressCardPusher =
+    progressCardConfig?.enabled !== false
+    && inboundEventKind !== 'room_event'
+    && (!isGroup || groupCfg?.progressCard === true)
+      ? createProgressCardPusher({
+          accountId: account.accountId,
+          to: qualifiedTarget,
+          scope: isGroup ? 'group' : 'c2c',
+          replyToId: envelope.messageId,
+          send: (text) => sendText({
+            to: qualifiedTarget,
+            text,
+            accountId: account.accountId,
+            replyToId: envelope.messageId,
+            account,
+            // 配额由 pusher 原子预占（含"剩余 ≥2 才消费"保底），此处直通 msg_id 防双记账
+            quotaReserved: true,
+          }),
+          log: log?.child('progress-card'),
+          minIntervalMs: progressCardConfig?.minIntervalMs,
+          maxPerTurn: progressCardConfig?.maxPerTurn,
+        })
+      : null;
+
+  if (progressCardPusher) {
+    dlog?.debug(`progress card push enabled for ${qualifiedTarget}`);
   }
 
   const deliveredMediaUrls = new Set<string>();
@@ -482,6 +520,16 @@ export async function dispatchToOpenClaw(
                   : undefined,
               }
             : {}),
+          ...(progressCardPusher
+            ? {
+                // progress_card 更新桥（steps-only）。suppress 标志既是回调转发的
+                // 前置条件（非 verbose 配置下），也抑制框架默认进度/工具摘要通知
+                onPlanUpdate: async (p: ProgressPlanUpdatePayload) => {
+                  await progressCardPusher.handlePlanUpdate(p);
+                },
+                suppressDefaultToolProgressMessages: true,
+              }
+            : {}),
         },
       });
       if (streamingController && !streamingController.isTerminal) {
@@ -558,6 +606,16 @@ export async function dispatchToOpenClaw(
                         onAssistantMessageStart: streamingController.isStaticSendMode
                           ? async () => { await streamingController.flushSegment(); }
                           : undefined,
+                      }
+                    : {}),
+                  ...(progressCardPusher
+                    ? {
+                        // progress_card 更新桥（steps-only）。suppress 标志既是回调转发的
+                        // 前置条件（非 verbose 配置下），也抑制框架默认进度/工具摘要通知
+                        onPlanUpdate: async (p: ProgressPlanUpdatePayload) => {
+                          await progressCardPusher.handlePlanUpdate(p);
+                        },
+                        suppressDefaultToolProgressMessages: true,
                       }
                     : {}),
                 },
