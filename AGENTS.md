@@ -1,6 +1,6 @@
 # AGENTS.md — openclaw-qqbot
 
-`@tencent-connect/openclaw-qqbot` — OpenClaw 通道插件，把 QQ Bot 官方 API 接入 OpenClaw framework。当前 v2.1.0。
+`@tencent-connect/openclaw-qqbot` — OpenClaw 通道插件，把 QQ Bot 官方 API 接入 OpenClaw framework。当前 v2.1.1。
 
 **构建基线：openclaw `2026.9.2`**（peer 范围 `>=2026.9.2`，devDependency 精确钉版 `2026.9.2`）。所有与 openclaw / `openclaw/plugin-sdk` 的交互以 2026.9.2 为最低兼容版本 —— 不得使用仅存在于更新版本中的 API，除非带能力探测与回退；升级钉版前必须重新评估兼容性（2026-09-07 升级：2026.9.2 为 registry `latest` stable；state DB schema 已到 15）。2026.9 系列带来的审批面变化：`ChannelApprovalKind` 新增 `"system-agent"`（OpenClaw 系统变更审批），插件已支持（eventKinds、`buildSystemAgentApprovalText`、button_data `approve:v2:system-agent:...`），且 `resolveApprovalOverGateway` 改用带 `approvalKind` 的规范重载（无 kind 的旧签名已 deprecated）。规范重载还**强制 reviewer 身份三元组**：传 `senderId` 就必须同时传 `channel: 'qqbot'` + `accountId`，否则 SDK 在任何网络请求之前直接抛 "channel approval resolution requires channel, account, and sender identity"，异常被 handleApproval 的 catch 吞掉后审批卡死到超时（2026-09-09 用户反馈事故；三元组同时让框架经 capability 的 `authorizeActorAction` 回调做 allowFrom 服务端授权。回归测试 `tests/approval-resolve.test.ts`，用 `module.register` loader 钩子拦截 SDK 动态导入断言调用参数）。
 

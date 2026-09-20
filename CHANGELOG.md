@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.1.1] - 2026-09-20
+
+### Added
+
+- **Progress card push**: OpenClaw `progress_card` tool updates are now pushed to QQ as milestone messages while the agent works on multi-step tasks (header `📋 进度 done/total` + `✅/🔄/⬜` step lines, auto-collapse of long completed/pending lists, width truncation). The first card creation is pushed immediately; subsequent pushes fire on every content change — no throttling by default (knobs `channels.qqbot.progressCard.minIntervalMs` / `maxPerTurn` can restore throttling). Passive-quota red line: pushes are passive-only, skipped when fewer than 2 slots remain so the final reply always keeps one, and never degrade to proactive sends. Enabled by default in C2C; groups are opt-in (`groups.<gid>.progressCard: true`); room-event groups are never pushed. The framework bridge delivers plan steps only — the card's markdown note is not pushed.
+- `getRemainingPassiveQuota()` read-only peek in the quota manager for reserve-guard prechecks.
+
+### Changed
+
+- Typing indicator default renewal interval 20s → 55s: the server window is ~60s, so the indicator stays near-continuous while consuming far fewer passive-quota slots (4/msg_id in C2C). The 20s QPS floor for explicit config is unchanged.
+
 ## [2.1.0] - 2026-08-17
 
 ### Changed

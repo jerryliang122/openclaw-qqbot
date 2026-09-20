@@ -1,6 +1,6 @@
 {
   "name": "openclaw-qqbot",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "QQ Bot channel plugin for OpenClaw (forked version with enhanced features)",
   "private": true,
   "type": "module",
